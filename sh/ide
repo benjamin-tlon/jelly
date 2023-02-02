@@ -1,0 +1,15 @@
+#!/usr/bin/env bash 
+
+SRC='murmur3.c jelly.c'
+
+INPUT='(3 (0 0 3 0 44 55) (0 0 3 0 44 55))'
+
+clear
+gcc $SRC && ./a.out <<<"$INPUT"
+
+while inotifywait -e modify -e close_write -e move -e create .
+do
+  clear
+  gcc $SRC && ./a.out <<<"$INPUT"
+done
+
