@@ -1,15 +1,13 @@
 #!/usr/bin/env bash 
 
-SRC='murmur3.c jelly.c'
-
-INPUT='(3 (0 0 3 0 44 55) (0 0 3 0 44 55))'
+INPUT='(3 (0 0 3 0 44 55) (0 0 3 0 44 55) 0x04 0x99 0xff 0xdeadbeef 0xdeadbeef77deadbeef 0x112233445566778899)'
 
 clear
-gcc $SRC && ./a.out <<<"$INPUT"
+make && ./a.out <<<"$INPUT"
 
-while inotifywait -e modify -e close_write -e move -e create .
+while
+        inotifywait -e modify -e close_write -e move -e create .
 do
-  clear
-  gcc $SRC && ./a.out <<<"$INPUT"
+        clear
+        make && ./a.out <<<"$INPUT"
 done
-

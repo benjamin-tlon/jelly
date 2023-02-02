@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "murmur3.h"
+#include "xxh3.h"
 
 
 // Internal murmur3 stuff //////////////////////////////////////////////////////
@@ -362,6 +363,13 @@ nat_t word_insert(Jelly *ctx, uint32_t bytes, uint64_t word) {
         return nat;
 }
 
+// TODO: deduplication
+nat_t bignat_insert(Jelly *ctx, leaf_t leaf) {
+        nat_t nat = alloc_nat(ctx);
+        ctx->nats[nat.ix] = leaf;
+        return nat;
+}
+
 void push_fan_backref(Jelly *ctx, treenode_t tree) {
         uint32_t nex = ctx->fans_count++;
         uint32_t wid = ctx->fans_width;
@@ -394,6 +402,29 @@ workspace_t jelly_word(Jelly *ctx, uint64_t w) {
         ent->leaves_hash = hash;
         ent->shape_hash  = 0;
         ent->pointer     = pointer;
+
+        return res;
+}
+
+workspace_t jelly_nat(Jelly *ctx, leaf_t leaf) {
+        printf("\tjelly_nat(width=%d)\n", leaf.width_bytes);
+
+        if (leaf.width_bytes < 9) {
+                // TODO no need for jelly_word to recompute byte-width.
+                return jelly_word(ctx, (uint64_t)leaf.bytes);
+        }
+
+        uint64_t   hash = XXH3_64bits(leaf.bytes, leaf.width_bytes);
+        nat_t      nat  = bignat_insert(ctx, leaf);
+        treenode_t node = alloc_treenode(ctx, TAG_NAT(nat));
+        workspace_t res = alloc_workspace(ctx);
+        FanEntry *ent   = &(ctx->workspaces[res.ix]);
+
+        ent->num_leaves  = 1;
+        ent->num_bytes   = leaf.width_bytes;
+        ent->leaves_hash = hash;
+        ent->shape_hash  = 0;
+        ent->pointer     = node;
 
         return res;
 }
@@ -460,9 +491,88 @@ workspace_t jelly_cons(Jelly *ctx, workspace_t hed, workspace_t tel) {
 
 #define die(...) (fprintf(stderr, __VA_ARGS__),exit(1))
 
+uint8_t hex_value(char a, char b) {
+    if (b == EOF) die("partial hex literal");
+
+    // printf("hex_value(%c, %c)\n", a, b);
+
+    uint8_t top_byte = (isdigit(a) ? (a - '0') : (tolower(a) - ('a' - 10)));
+    // printf("top_byte %d (%c)\n", (int) top_byte, tolower(a));
+
+    uint8_t low_byte = (isdigit(b) ? (b - '0') : (tolower(b) - ('a' - 10)));
+    // printf("low_byte %d (%c)\n", (int) low_byte, tolower(b));
+
+    uint8_t result = (top_byte << 4) | low_byte;
+    // printf("result %d\n", (int) result);
+
+    return result;
+}
+
+uint64_t pack_bytes_msb(size_t width, char *bytes) {
+        uint64_t res = 0;
+        for (int i=0; i<width; i++) {
+                uint64_t tmp = (uint8_t) bytes[i];
+                res = (res<<8) | tmp;
+        }
+        return res;
+}
+
+uint64_t pack_bytes_lsb(size_t width, char *bytes) {
+        uint64_t res = 0;
+        for (int i=0; i<width; i++) {
+                uint64_t tmp = bytes[i];
+                res |= (tmp << (i*i));
+        }
+        return res;
+}
+
 workspace_t read_one(Jelly*);
 workspace_t read_many(Jelly*, workspace_t);
 workspace_t read_some(Jelly*);
+
+leaf_t read_hex() {
+        size_t count=0, wid=256;
+        char tmp[256], *buf=tmp;
+
+    loop:
+
+        char c = getchar();
+
+        if (isalnum(c)) {
+                char d = getchar();
+
+                uint8_t byte = hex_value(c, d);
+
+                if (count >= wid) {
+                        wid *= 4;
+                        buf = ((tmp==buf) ? malloc(wid) : realloc(buf,wid));
+                }
+
+                buf[count++] = byte;
+
+                goto loop;
+        }
+
+        ungetc(c, stdin);
+
+    end:
+
+        leaf_t result = { .width_bytes = count, .bytes = NULL };
+
+        if (count < 8) {
+                uint8_t **hack_slot = &(result.bytes);
+                *((uint64_t*)hack_slot) = pack_bytes_msb(count, buf);
+        } else {
+                result.bytes = malloc(count);
+                for (int i=0, j=(count-1); i<count; i++, j--) {
+                    result.bytes[i] = buf[j];
+                }
+        }
+
+        if (buf != tmp) free(buf);
+
+        return result;
+}
 
 uint64_t read_word(uint64_t acc) {
         printf("\tread_word(%lu)\n", acc);
@@ -488,13 +598,6 @@ workspace_t read_many(Jelly *ctx, workspace_t acc) {
     loop:
         int c = getchar();
 
-        if isdigit(c) {
-                uint64_t word = read_word((uint64_t)(c - '0'));
-                workspace_t elmt = jelly_word(ctx, word);
-                acc = jelly_cons(ctx, acc, elmt);
-                goto loop;
-        }
-
         switch (c) {
             case '(':
                 acc = jelly_cons(ctx, acc, read_many(ctx, read_one(ctx)));
@@ -507,8 +610,31 @@ workspace_t read_many(Jelly *ctx, workspace_t acc) {
             case '\r':
             case '\t':
                 goto loop;
+            case '0': {
+                c = getchar();
+                if (c == 'x') {
+                        leaf_t data = read_hex();
+                        workspace_t elmt = jelly_nat(ctx, data);
+                        acc = jelly_cons(ctx, acc, elmt);
+                        goto loop;
+                } else if (isdigit(c)) {
+                        die("Non-zero numbers must not be zero-prefixed");
+                } else {
+                        ungetc(c, stdin);
+                        workspace_t elmt = jelly_word(ctx, 0);
+                        acc = jelly_cons(ctx, acc, elmt);
+                        goto loop;
+                }
+            }
             default:
-                die("Unexpected character: %c (read_many)\n", c);
+                if isdigit(c) {
+                        uint64_t word = read_word((uint64_t)(c - '0'));
+                        workspace_t elmt = jelly_word(ctx, word);
+                        acc = jelly_cons(ctx, acc, elmt);
+                        goto loop;
+                } else {
+                        die("Unexpected character: %c (read_many)\n", c);
+                }
         }
 }
 
@@ -549,11 +675,19 @@ void jelly_push_final(Jelly *ctx, workspace_t val) {
         push_fan_backref(ctx, tree);
 }
 
+
 void print_nat(Jelly *ctx, nat_t nat) {
         leaf_t l = ctx->nats[nat.ix];
-        if (l.width_bytes > 8) die("TODO");
-        uint64_t value = (uint64_t) l.bytes;
-        printf("%lu", value);
+        if (l.width_bytes > 8) {
+                printf("0x");
+                for (int i = l.width_bytes - 1; i>=0; i--) {
+                        uint8_t byte = l.bytes[i];
+                        printf("%02x", (unsigned) byte);
+                }
+        } else {
+                uint64_t value = (uint64_t) l.bytes;
+                printf("%lu", value);
+        }
 }
 
 void print_tree(Jelly*, treenode_t);
@@ -628,10 +762,9 @@ void jelly_debug(Jelly *ctx) {
                        ctx->nats_count);
                 int num = ctx->nats_count;
                 for (int i=0; i<num; i++) {
-                        leaf_t l = ctx->nats[i];
-                        if (l.width_bytes > 8) die("TODO");
-                        uint64_t value = (uint64_t) l.bytes;
-                        printf("\t\tn%d = %lu\n", i, value);
+                        printf("\t\tn%d = ", i);
+                        print_nat(ctx, (nat_t){ .ix = i });
+                        printf("\n");
                 }
         }
 
