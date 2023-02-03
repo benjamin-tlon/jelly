@@ -383,16 +383,17 @@ nat_t word_insert(Jelly *ctx, uint32_t bytes, uint64_t hash, uint64_t word) {
                                   // if we do it later, we will invalidate
                                   // our pointer.
 
-        tagged_width_t width = NAT_TAGGED_WIDTH(bytes);
+        tagged_width_t tagged_width = NAT_TAGGED_WIDTH(bytes);
+
         leaves_table_entry_t *ent;
 
         for (ent = ctx->leaves_table; ent->hash; ent++) {
                 bool match = ent->hash == hash &&
-                             ent->width.word == width.word &&
+                             ent->width.word == tagged_width.word &&
                              ent->bytes == (uint8_t*) word;
 
                 if (match) {
-                        printf("\t\tDUPLICATE LEAF (n%d = %lu)\n", ent->offset, word);
+                        printf("\t\tMATCH: n%d\n", ent->offset);
                         return (nat_t){ .ix = ent->offset };
                 }
         }
@@ -408,27 +409,68 @@ nat_t word_insert(Jelly *ctx, uint32_t bytes, uint64_t hash, uint64_t word) {
         */
 
         nat_t nat = alloc_nat(ctx);
-        leaf_t *l = (ctx->nats + nat.ix);
-        l->bytes       = (uint8_t*) word;
-        l->width_bytes = bytes;
 
-        /*
-                Fill the empty slot in the leaves_table that we found
-                while searching.
-        */
+        ctx->nats[nat.ix] = (leaf_t){
+                .bytes = (uint8_t*) word,
+                .width_bytes = bytes
+        };
 
-        ent->hash  = hash;
-        ent->width = width;
-        ent->bytes = (uint8_t*) word;
-        ent->offset = nat.ix;
+        *ent = (leaves_table_entry_t){
+            .hash  = hash,
+            .width = tagged_width,
+            .bytes = (uint8_t*) word,
+            .offset = nat.ix
+        };
+
+        printf("\t\tNEW_LEAF: n%d\n", nat.ix);
 
         return nat;
 }
 
-// TODO: deduplication
-nat_t bignat_insert(Jelly *ctx, leaf_t leaf) {
+void print_nat_leaf(Jelly*, leaf_t);
+
+nat_t bignat_insert(Jelly *ctx, uint64_t hash, leaf_t leaf) {
+        printf("\tbignat_insert(wid=%u, ", leaf.width_bytes);
+        print_nat_leaf(ctx, leaf);
+        printf(")\n");
+
+        /*
+                Do a linear-search over the leaves table, and return the
+                index of the corresponding nat, if we find one.
+        */
+
+        grow_leaves_if_full(ctx); // Make sure there is space to insert,
+                                  // if we do it later, we will invalidate
+                                  // our pointer.
+
+        tagged_width_t tagged_width = NAT_TAGGED_WIDTH(leaf.width_bytes);
+        leaves_table_entry_t *ent;
+
+        for (ent = ctx->leaves_table; ent->hash; ent++) {
+                bool hit = (ent->hash == hash) && (ent->width.word == tagged_width.word);
+                if (!hit) continue;
+
+                int o = memcmp(ent->bytes, leaf.bytes, leaf.width_bytes);
+                if (o != 0) continue;
+
+                printf("\t\tMATCH: n%d\n", ent->offset);
+                return (nat_t){ .ix = ent->offset };
+        }
+
+        ctx->leaves_table_count++;
+
         nat_t nat = alloc_nat(ctx);
         ctx->nats[nat.ix] = leaf;
+
+        *ent = (leaves_table_entry_t){
+            .hash  = hash,
+            .width = tagged_width,
+            .bytes = leaf.bytes,
+            .offset = nat.ix
+        };
+
+        printf("\t\tNEW_LEAF: n%d\n", nat.ix);
+
         return nat;
 }
 
@@ -480,7 +522,7 @@ workspace_t jelly_nat(Jelly *ctx, leaf_t leaf) {
         }
 
         uint64_t   hash = XXH3_64bits(leaf.bytes, leaf.width_bytes);
-        nat_t      nat  = bignat_insert(ctx, leaf);
+        nat_t      nat  = bignat_insert(ctx, hash, leaf);
         treenode_t node = alloc_treenode(ctx, TAG_NAT(nat));
         workspace_t res = alloc_workspace(ctx);
         FanEntry *ent   = &(ctx->workspaces[res.ix]);
@@ -731,6 +773,19 @@ void jelly_push_final(Jelly *ctx, workspace_t val) {
         push_fan_backref(ctx, tree);
 }
 
+
+void print_nat_leaf(Jelly *ctx, leaf_t l) {
+        if (l.width_bytes > 8) {
+                printf("0x");
+                for (int i = l.width_bytes - 1; i>=0; i--) {
+                        uint8_t byte = l.bytes[i];
+                        printf("%02x", (unsigned) byte);
+                }
+        } else {
+                uint64_t value = (uint64_t) l.bytes;
+                printf("%lu", value);
+        }
+}
 
 void print_nat(Jelly *ctx, nat_t nat) {
         leaf_t l = ctx->nats[nat.ix];
