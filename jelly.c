@@ -220,10 +220,7 @@ Jelly *new_jelly_ctx () {
         res->words_table_width = 8;
         res->words_table_count = 0;
 
-        // TODO: Deduplication for indirect-atoms.
-        res->words_table = malloc(8 * sizeof(word_entry_t));
-        res->words_table_width = 8;
-        res->words_table_count = 0;
+        // TODO: Deduplication for bignats;
 
         // Array of duplicate tree-nodes (and the top-level node).  Each one
         // is an index into `treenodes`.

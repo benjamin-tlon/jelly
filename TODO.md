@@ -1,3 +1,85 @@
+-   TODO The front-end should own all the binary data for bars, bignats,
+    and pins.
+
+    That data should not be freed with the context.
+
+-   TODO Maybe we should have a single `leaves` array, and have each
+    be tagged with it's type.
+
+    This would simplify the code for deduplication of naturals, at the
+    expense of slightly worse bucketing.
+
+    Instead of having a table of words, a table of pins, a table of bars,
+    and a table of nats, we would have a table of tagged leaves:
+
+        struct leaves_table_entry {
+            uint64_t hash;
+            tagged_width_t width;
+            uint8_t *bytes;
+            int64_t offset; // Index into pins/bars/nats (depending on the tag).
+        }
+
+    So, you would hash, tag the width, calculate the starting offset,
+    and then just scan the table.
+
+    The duplicates case would be slightly slower for direct words, but
+    not much.  The `bytes` field would still be inline, and we would have
+    a custom code-path for searching for data the fits in a word.
+
+    In the search-for-word path, we would ignore the hash and just
+    directly compare the `bytes` and `width` fields.  Most failing cases
+    are still only one compare, successful cases is two comparisions.
+
+    It also doubles the width of the words table, but it saves us from
+    needing to be constantly searching accross four tables, which has
+    worse memory locality.
+
+    This is also slightly slower for pins, but barely.  The hash (just
+    the first word of the pin) will almost never match for equal values,
+    so we get single-compare checks in most cases.  A successful compare
+    is (hash + tagged_width + bytes[1] + bytes[2] + bytes[3]).
+
+    Yeah, that's interesting, we can still have specialized insert logic
+    per-type, but still have a single data structure, a single routine
+    to grow hash tables, etc.
+
+            uint64_t hash;
+            tagged_width_t width;
+            uint8_t *bytes;
+            int64_t offset; // Index into pins/bars/nats (depending on the tag).
+
+-   TODO: Decide about details of hash table implementation.
+
+    Hash table capacity will be a power of two.
+
+    Hash table capacity will double whenever it becomes half full.
+
+    We calculate the offset by using bit-wise and against the hash.
+    We store the mask in the environment to avoid recalculating it.
+
+    We use a zero-hash to indicate an empty field.  Our hash function
+    never produces zero, because we catch zero hashes and replace them
+    with one.
+
+    So, to insert:
+
+            uint64_t index = hash
+        loop:
+            index &= mask
+            if (table[index]->hash == 0) {
+                INSERT;
+                load++;
+                if ((load * 2) > capacity) GROW;
+            } else if (MATCH(value, table[index])) {
+                FOUND;
+            } else {
+                index++;
+                goto loop;
+            }
+
+    The specifics of FOUND and INSERT are specialized per entry-type,
+    but the rest of the logic stays the same.
+
 ## Deduplication
 
 -   TODO Deduplication support for large nats.
