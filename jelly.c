@@ -559,16 +559,9 @@ workspace_t jelly_cons(Jelly *ctx, workspace_t hed, workspace_t tel) {
 uint8_t hex_value(char a, char b) {
     if (b == EOF) die("partial hex literal");
 
-    // printf("hex_value(%c, %c)\n", a, b);
-
     uint8_t top_byte = (isdigit(a) ? (a - '0') : (tolower(a) - ('a' - 10)));
-    // printf("top_byte %d (%c)\n", (int) top_byte, tolower(a));
-
     uint8_t low_byte = (isdigit(b) ? (b - '0') : (tolower(b) - ('a' - 10)));
-    // printf("low_byte %d (%c)\n", (int) low_byte, tolower(b));
-
-    uint8_t result = (top_byte << 4) | low_byte;
-    // printf("result %d\n", (int) result);
+    uint8_t result   = (top_byte << 4) | low_byte;
 
     return result;
 }
@@ -619,8 +612,6 @@ leaf_t read_hex() {
         }
 
         ungetc(c, stdin);
-
-    end:
 
         leaf_t result = { .width_bytes = count, .bytes = NULL };
 
