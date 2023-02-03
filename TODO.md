@@ -1,3 +1,5 @@
+-   TODO Make sure no leaf-hash is every zero.
+
 -   TODO The front-end should own all the binary data for bars, bignats,
     and pins.
 

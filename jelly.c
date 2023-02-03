@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
@@ -50,6 +51,8 @@ size_t hash_combine(uint64_t x, uint64_t y) {
 
         For example: 0 takes 0 bytes, 127 takes 1 byte, 256 takes two
         bytes, etc.
+
+        TODO: This should return 0 for 0, but it seems to return 1.
 */
 uint32_t word64_bytes (uint64_t w) {
         uint32_t zeros = __builtin_clzll(w);
@@ -100,6 +103,29 @@ typedef struct word_entry {
         nat_t    index;
 } word_entry_t;
 
+/*
+    10xx.. indicates a pin
+    11xx.. indicates a bar
+    0xxx.. indicates a nat
+*/
+typedef struct tagged_width {
+        uint64_t word;
+} tagged_width_t;
+
+/*
+        `offset` is an index into Jelly.pins, Jelly.bars, or Jelly.nats,
+        depending on the tag in `tagged_width`
+
+        If the byte-array width is less than nine, the data is directly
+        inlined into `bytes`.
+*/
+typedef struct leaves_table_entry {
+        uint64_t hash;
+        tagged_width_t width;
+        uint8_t *bytes;
+        int32_t offset;
+} leaves_table_entry_t;
+
 /* A nat or a bar */
 typedef struct leaf {
         int32_t width_bytes;
@@ -133,10 +159,11 @@ typedef struct jelly_ctx {
     uint32_t nats_width;
     uint32_t nats_count;
 
-    // Deduplication table for direct atoms (atoms that fit in a 64 bit word)
-    word_entry_t *words_table;
-    uint32_t words_table_width;
-    uint32_t words_table_count;
+    // Leaf Deduplication table.
+    leaves_table_entry_t *leaves_table;
+    uint32_t leaves_table_width;
+    uint32_t leaves_table_count;
+
 
     // Array of duplicate tree-nodes (and the top-level node).  Each one
     // is an index into `treenodes`.
@@ -201,26 +228,20 @@ Jelly *new_jelly_ctx () {
         res->pins_width = 8;
         res->pins_count = 0;
 
-        // TODO: Deduplication table for pins
-
         // Array of unique bar-leaves
         res->bars       = malloc(8 * sizeof(leaf_t));
         res->bars_width = 8;
         res->bars_count = 0;
-
-        // TODO: Deduplication table for bars
 
         // Array of unique nat-leaves
         res->nats       = malloc(8 * sizeof(leaf_t));
         res->nats_width = 8;
         res->nats_count = 0;
 
-        // Deduplication table for direct-atoms.
-        res->words_table = malloc(8 * sizeof(word_entry_t));
-        res->words_table_width = 8;
-        res->words_table_count = 0;
-
-        // TODO: Deduplication for bignats;
+        // Deduplication table for leaves
+        res->leaves_table = calloc(32, sizeof(leaves_table_entry_t));
+        res->leaves_table_width = 32;
+        res->leaves_table_count = 0;
 
         // Array of duplicate tree-nodes (and the top-level node).  Each one
         // is an index into `treenodes`.
@@ -237,7 +258,7 @@ void free_jelly_ctx (Jelly *ctx) {
         free(ctx->pins);
         free(ctx->bars);
         free(ctx->nats);
-        free(ctx->words_table);
+        free(ctx->leaves_table);
         free(ctx->fans);
         free(ctx);
 }
@@ -303,22 +324,80 @@ FORCE_INLINE nat_t alloc_nat(Jelly *c) {
 }
 
 
+// Tagged Widths ///////////////////////////////////////////////////////////////
+
+/*
+        0xxx.. indicates a nat
+        10xx.. indicates a pin
+        11xx.. indicates a bar
+*/
+FORCE_INLINE tagged_width_t NAT_TAGGED_WIDTH(uint32_t bytes) {
+        uint64_t word = bytes;
+        return (tagged_width_t){ .word = word };
+}
+
+FORCE_INLINE tagged_width_t PIN_TAGGED_WIDTH(uint32_t bytes) {
+        uint64_t word = bytes;
+        word |= 2ULL << 62;
+        return (tagged_width_t){ .word = word };
+}
+
+FORCE_INLINE tagged_width_t BAR_TAGGED_WIDTH(uint32_t bytes) {
+        uint64_t word = bytes;
+        word |= 3ULL << 62;
+        return (tagged_width_t){ .word = word };
+}
+
+
 // Inserting ///////////////////////////////////////////////////////////////////
 
-nat_t word_insert(Jelly *ctx, uint32_t bytes, uint64_t word) {
+void grow_leaves_if_full(Jelly *ctx) {
+        uint32_t wid = ctx->leaves_table_width;
+        uint32_t num = ctx->leaves_table_count;
+
+        if ((num+1) >= wid) {
+                wid *= 2;
+                ctx->leaves_table_width = wid;
+                ctx->leaves_table = reallocarray
+                    ( ctx->leaves_table
+                    , wid
+                    , sizeof(leaves_table_entry_t)
+                    );
+                bzero( ctx->leaves_table + num
+                     , (wid - num) * sizeof(leaves_table_entry_t)
+                     );
+        }
+
+}
+
+
+nat_t word_insert(Jelly *ctx, uint32_t bytes, uint64_t hash, uint64_t word) {
         printf("\tword_insert(wid=%u, %lu)\n", bytes, word);
-        uint32_t end = ctx->words_table_count;
 
         /*
-                Do a linear-search over the words table, and return the
+                Do a linear-search over the leaves table, and return the
                 index of the corresponding nat, if we find one.
         */
 
-        for (uint32_t i=0; i<end; i++) {
-                if (ctx->words_table[i].value == word) {
-                        return ctx->words_table[i].index;
+        grow_leaves_if_full(ctx); // Make sure there is space to insert,
+                                  // if we do it later, we will invalidate
+                                  // our pointer.
+
+        tagged_width_t width = NAT_TAGGED_WIDTH(bytes);
+        leaves_table_entry_t *ent;
+
+        for (ent = ctx->leaves_table; ent->hash; ent++) {
+                bool match = ent->hash == hash &&
+                             ent->width.word == width.word &&
+                             ent->bytes == (uint8_t*) word;
+
+                if (match) {
+                        printf("\t\tDUPLICATE LEAF (n%d = %lu)\n", ent->offset, word);
+                        return (nat_t){ .ix = ent->offset };
                 }
         }
+
+        ctx->leaves_table_count++;
 
         /*
                 The word is unique, append the word to the end of the
@@ -329,33 +408,19 @@ nat_t word_insert(Jelly *ctx, uint32_t bytes, uint64_t word) {
         */
 
         nat_t nat = alloc_nat(ctx);
-        ctx->nats[nat.ix].width_bytes = bytes;
         leaf_t *l = (ctx->nats + nat.ix);
-        uint8_t **hack_slot = &(l->bytes);
-        *((uint64_t*)hack_slot) = word;
+        l->bytes       = (uint8_t*) word;
+        l->width_bytes = bytes;
 
         /*
-                If words_table isn't big enough to simply append the
-                element, realloc it first.
+                Fill the empty slot in the leaves_table that we found
+                while searching.
         */
 
-        uint32_t wid = ctx->words_table_width;
-        if (end == wid) {
-                wid = wid + (wid / 2);
-                ctx->words_table = reallocarray(
-                    ctx->words_table,
-                    wid,
-                    sizeof(ctx->words_table[0])
-                );
-                ctx->words_table_width = wid;
-        }
-
-        /*
-                Append to the end of the words_table array.
-        */
-
-        ctx->words_table[end] = (word_entry_t){ .value = word, .index = nat };
-        ctx->words_table_count = end+1;
+        ent->hash  = hash;
+        ent->width = width;
+        ent->bytes = (uint8_t*) word;
+        ent->offset = nat.ix;
 
         return nat;
 }
@@ -385,9 +450,12 @@ void push_fan_backref(Jelly *ctx, treenode_t tree) {
 
 workspace_t jelly_word(Jelly *ctx, uint64_t w) {
         printf("\tjelly_word(%lu)\n", w);
-        uint64_t hash    = fmix64(w);
-        uint32_t bytes   = word64_bytes(w);
-        nat_t   nat      = word_insert(ctx, bytes, w);
+
+        uint64_t hash = fmix64(w);
+        hash += !hash; // Zero hash means empty hashtable entry.
+
+        uint32_t bytes = word64_bytes(w);
+        nat_t   nat    = word_insert(ctx, bytes, hash, w);
 
         treenode_t pointer = alloc_treenode(ctx, TAG_NAT(nat));
 
@@ -751,6 +819,35 @@ void jelly_debug(Jelly *ctx) {
                        free_workspaces);
         }
 
+        {
+                printf("\n\tleaves: (width=%u, count=%u)\n\n",
+                       ctx->leaves_table_width,
+                       ctx->leaves_table_count);
+
+                int num = ctx->leaves_table_count;
+
+                for (int i=0; i<num; i++) {
+                        leaves_table_entry_t ent = ctx->leaves_table[i];
+
+                        uint64_t width = ((ent.width.word << 2) >> 2);
+
+                        char type;
+                        switch (width >> 62) {
+                            case 2:  type = 'p'; break;
+                            case 3:  type = 'b'; break;
+                            default: type = 'n'; break;
+                        }
+
+                        printf("\t\t[%04d] %c%d = ", i, type, ent.offset);
+                        print_nat(ctx, (nat_t){ .ix = i });
+                        if (width < 9) {
+                                uint64_t word = (uint64_t) ctx->nats[i].bytes;
+                                if (word < 999) printf("\t");
+                        }
+                        printf("\t(hash=%lu, width=%lu)\n", ent.hash, width);
+                }
+        }
+
         uint32_t count = ctx->fans_count;
 
         {
@@ -774,8 +871,14 @@ void jelly_debug(Jelly *ctx) {
                         treenode_value val = ctx->treenodes[i];
                         switch (val.word >> 61) {
                             case 4:
+                                printf("\t\t%d = p%u\n", i, (uint32_t) val.word);
+                                continue;
                             case 5:
+                                printf("\t\t%d = b%u\n", i, (uint32_t) val.word);
+                                continue;
                             case 6:
+                                printf("\t\t%d = n%u\n", i, (uint32_t) val.word);
+                                continue;
                             case 7:
                                 printf("\t\t%d = f%u\n", i, (uint32_t) val.word);
                                 continue;
