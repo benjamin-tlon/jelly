@@ -7,7 +7,7 @@
 
 ((0 0 4 0) "foo" "foo" "foo")
 
-(0 0 3 0 "abcdefghijklmnopqrstuvwxyz" "abcdefghijklmnopqrstuvwxyz")
+((0 0 3 0) "abcdefghijklmnopqrstuvwxyz" "abcdefghijklmnopqrstuvwxyz")
 
 ((0 0 4 0) 0x99 0xff 0xff)
 

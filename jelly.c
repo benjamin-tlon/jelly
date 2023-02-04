@@ -147,7 +147,7 @@ typedef struct jelly_ctx {
     int32_t treenodes_count;
 
     // Array of unique pin-leaves.
-    hash256_t *pins;
+    hash256_t **pins;
     uint32_t pins_width;
     uint32_t pins_count;
 
@@ -174,8 +174,17 @@ typedef struct jelly_ctx {
     uint32_t fans_count;
 } Jelly;
 
-#define TAG_PIN(x) (x | (4ULL << 61)) // 100...
-#define TAG_FAN(x) (x | (7ULL << 61)) // 111...
+FORCE_INLINE treenode_value TAG_FAN(fan_t fan) {
+        uint64_t index = (uint64_t) fan.ix;
+        uint64_t word  = (index | 7ULL << 61);
+        return (treenode_value){ word };
+}
+
+FORCE_INLINE treenode_value TAG_PIN(pin_t pin) {
+        uint64_t index = (uint64_t) pin.ix;
+        uint64_t word  = (index | 4ULL << 61);
+        return (treenode_value){ word };
+}
 
 FORCE_INLINE treenode_value TAG_BAR(bar_t bar) {
         uint64_t index = (uint64_t) bar.ix;
@@ -214,50 +223,50 @@ FORCE_INLINE treenode_t TREENODE_VAL_TAIL(treenode_value v) {
 
 // We rely on the cast to drop the high-bits.
 FORCE_INLINE nat_t TREENODE_VAL_NAT(treenode_value v) {
-    return (nat_t){ .ix = (uint32_t) v.word };
+        return (nat_t){ .ix = (uint32_t) v.word };
 }
 
 // We rely on the cast to drop the high-bits.
 FORCE_INLINE bar_t TREENODE_VAL_BAR(treenode_value v) {
-    return (bar_t){ .ix = (uint32_t) v.word };
+        return (bar_t){ .ix = (uint32_t) v.word };
 }
 
 // Memory Management ///////////////////////////////////////////////////////////
 
 Jelly *new_jelly_ctx () {
         Jelly *res = malloc(sizeof(Jelly));
-        res->workspaces          = malloc(32 * sizeof(FanEntry));
+        res->workspaces          = calloc(32, sizeof(res->workspaces[0]));
         res->workspaces_width    = 32;
         res->workspaces_count    = 0;
         res->workspaces_freelist = (workspace_t){-1};
 
-        res->treenodes       = malloc(32 * sizeof(uint64_t));
+        res->treenodes       = calloc(32, sizeof(res->treenodes[0]));
         res->treenodes_width = 32;
         res->treenodes_count = 0;
 
         // Array of unique pin-leaves.
-        res->pins       = malloc(8 * sizeof(hash256_t));
+        res->pins       = calloc(8, sizeof(res->pins[0]));
         res->pins_width = 8;
         res->pins_count = 0;
 
         // Array of unique bar-leaves
-        res->bars       = malloc(8 * sizeof(leaf_t));
+        res->bars       = calloc(8, sizeof(res->bars[0]));
         res->bars_width = 8;
         res->bars_count = 0;
 
         // Array of unique nat-leaves
-        res->nats       = malloc(8 * sizeof(leaf_t));
+        res->nats       = calloc(8, sizeof(res->nats[0]));
         res->nats_width = 8;
         res->nats_count = 0;
 
         // Deduplication table for leaves
-        res->leaves_table = calloc(32, sizeof(leaves_table_entry_t));
+        res->leaves_table = calloc(32, sizeof(res->leaves_table[0]));
         res->leaves_table_width = 32;
         res->leaves_table_count = 0;
 
         // Array of duplicate tree-nodes (and the top-level node).  Each one
         // is an index into `treenodes`.
-        res->fans       = malloc(64 * sizeof(uint32_t));
+        res->fans       = calloc(64, sizeof(res->fans[0]));
         res->fans_width = 64;
         res->fans_count = 0;
 
@@ -322,32 +331,6 @@ FORCE_INLINE treenode_t alloc_treenode(Jelly *c, treenode_value v) {
         return (treenode_t){ .ix = res };
 }
 
-FORCE_INLINE bar_t alloc_bar(Jelly *c) {
-        uint32_t res = c->bars_count++;
-        uint32_t wid = c->bars_width;
-
-        if (res >= wid) {
-                wid = wid + (wid / 2);
-                c->bars = reallocarray(c->bars, wid, sizeof(c->bars[0]));
-                c->bars_width = wid;
-        }
-
-        return (bar_t){ .ix = res };
-}
-
-FORCE_INLINE nat_t alloc_nat(Jelly *c) {
-        uint32_t res = c->nats_count++;
-        uint32_t wid = c->nats_width;
-
-        if (res >= wid) {
-                wid = wid + (wid / 2);
-                c->nats = reallocarray(c->nats, wid, sizeof(c->nats[0]));
-                c->nats_width = wid;
-        }
-
-        return (nat_t){ .ix = res };
-}
-
 
 // Tagged Widths ///////////////////////////////////////////////////////////////
 
@@ -392,7 +375,7 @@ typedef struct {
 typedef struct {
         tagged_width_t width;
         uint64_t hash;
-        uint8_t *bytes;
+        leaf_t leaf;
         InsertResult (*new_leaf)(Jelly*, leaf_t);
         treenode_value (*found_leaf)(Jelly*, uint32_t);
 } IndirectInsertRequest;
@@ -493,13 +476,10 @@ workspace_t packed_insert(Jelly *ctx, PackedInsertRequest req) {
 
 void print_nat_leaf(Jelly*, leaf_t);
 
-workspace_t insert_indirect_leaf(Jelly *ctx, bool isbar, leaf_t leaf) {
-        printf("\tinsert_indirect_leaf(wid=%u, ", leaf.width_bytes);
-        print_nat_leaf(ctx, leaf);
+workspace_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
+        printf("\tinsert_indirect_leaf(wid=%u, ", req.leaf.width_bytes);
+        print_nat_leaf(ctx, req.leaf);
         printf(")\n");
-
-        uint64_t hash = XXH3_64bits(leaf.bytes, leaf.width_bytes);
-        hash += !hash;
 
         /*
                 Do a linear-search over the leaves table, and return the
@@ -510,55 +490,33 @@ workspace_t insert_indirect_leaf(Jelly *ctx, bool isbar, leaf_t leaf) {
                                   // if we do it later, we will invalidate
                                   // our pointer.
 
-        tagged_width_t tagged_width = isbar ? BAR_TAGGED_WIDTH(leaf.width_bytes)
-                                            : NAT_TAGGED_WIDTH(leaf.width_bytes);
-
         leaves_table_entry_t *ent;
 
         for (ent = ctx->leaves_table; ent->hash; ent++) {
-                bool hit = (ent->hash == hash) && (ent->width.word == tagged_width.word);
+                bool hit = (ent->hash == req.hash) && (ent->width.word == req.width.word);
                 if (!hit) continue;
 
-                int o = memcmp(ent->bytes, leaf.bytes, leaf.width_bytes);
+                int o = memcmp(ent->bytes, req.leaf.bytes, req.leaf.width_bytes);
                 if (o != 0) continue;
 
                 printf("\t\tMATCH: n%d\n", ent->offset);
 
-                return create_node(ctx, hash, leaf.width_bytes,
-                                   (isbar ? TAG_BAR((bar_t){ .ix = ent->offset })
-                                          : TAG_NAT((nat_t){ .ix = ent->offset })));
-
+                treenode_value v = req.found_leaf(ctx, ent->offset);
+                return create_node(ctx, req.hash, req.leaf.width_bytes, v);
         }
 
         ctx->leaves_table_count++;
 
-        int32_t offset;
-        char type;
-
-        if (isbar) {
-                bar_t bar = alloc_bar(ctx);
-                ctx->bars[bar.ix] = leaf;
-                offset = bar.ix;
-                type = 'n';
-        } else {
-                nat_t nat = alloc_nat(ctx);
-                ctx->nats[nat.ix] = leaf;
-                offset = nat.ix;
-                type = 'n';
-        }
-
-        printf("\t\tNEW_LEAF: %c%d\n", type, offset);
+        InsertResult record = req.new_leaf(ctx, req.leaf);
 
         *ent = (leaves_table_entry_t){
-            .hash  = hash,
-            .width = tagged_width,
-            .bytes = leaf.bytes,
-            .offset = offset,
+            .hash  = req.hash,
+            .width = req.width,
+            .bytes = req.leaf.bytes,
+            .offset = record.offset,
         };
 
-        return create_node(ctx, hash, leaf.width_bytes,
-                           (isbar ? TAG_BAR((bar_t){ .ix = offset })
-                                  : TAG_NAT((nat_t){ .ix = offset })));
+        return create_node(ctx, req.hash, req.leaf.width_bytes, record.val);
 }
 
 void push_fan_backref(Jelly *ctx, treenode_t tree) {
@@ -575,7 +533,20 @@ void push_fan_backref(Jelly *ctx, treenode_t tree) {
 }
 
 
-// Inserting Packed Nats ///////////////////////////////////////////////////////
+// Inserting Nats //////////////////////////////////////////////////////////////
+
+FORCE_INLINE nat_t alloc_nat(Jelly *c) {
+        uint32_t res = c->nats_count++;
+        uint32_t wid = c->nats_width;
+
+        if (res >= wid) {
+                wid = wid + (wid / 2);
+                c->nats = reallocarray(c->nats, wid, sizeof(c->nats[0]));
+                c->nats_width = wid;
+        }
+
+        return (nat_t){ .ix = res };
+}
 
 static InsertResult
 new_nat (Jelly *ctx, leaf_t leaf) {
@@ -611,14 +582,38 @@ workspace_t jelly_nat(Jelly *ctx, leaf_t leaf) {
         if (leaf.width_bytes < 9) {
                 return jelly_packed_nat(ctx, leaf.width_bytes, (uint64_t)leaf.bytes);
         } else {
-                return insert_indirect_leaf(ctx, false, leaf);
+                uint64_t hash = XXH3_64bits(leaf.bytes, leaf.width_bytes);
+                hash += !hash;
+
+                return insert_indirect_leaf(ctx,
+                    (IndirectInsertRequest){
+                        .width = NAT_TAGGED_WIDTH(leaf.width_bytes),
+                        .hash = hash,
+                        .leaf = leaf,
+                        .new_leaf = new_nat,
+                        .found_leaf = found_nat,
+                    }
+                );
         }
 }
 
 
 
 
-// Inserting Packed Bars ///////////////////////////////////////////////////////
+// Inserting Bars //////////////////////////////////////////////////////////////
+
+FORCE_INLINE bar_t alloc_bar(Jelly *c) {
+        uint32_t res = c->bars_count++;
+        uint32_t wid = c->bars_width;
+
+        if (res >= wid) {
+                wid = wid + (wid / 2);
+                c->bars = reallocarray(c->bars, wid, sizeof(c->bars[0]));
+                c->bars_width = wid;
+        }
+
+        return (bar_t){ .ix = res };
+}
 
 static InsertResult
 new_bar (Jelly *ctx, leaf_t leaf) {
@@ -651,8 +646,65 @@ workspace_t jelly_bar(Jelly *ctx, leaf_t leaf) {
                     }
                 );
         } else {
-                return insert_indirect_leaf(ctx, true, leaf);
+                uint64_t hash = XXH3_64bits(leaf.bytes, leaf.width_bytes);
+                hash += !hash;
+
+                return insert_indirect_leaf(ctx,
+                    (IndirectInsertRequest){
+                        .width = BAR_TAGGED_WIDTH(leaf.width_bytes),
+                        .hash = hash,
+                        .leaf = leaf,
+                        .new_leaf = new_bar,
+                        .found_leaf = found_bar,
+                    }
+                );
         }
+}
+
+
+// Inserting Pins //////////////////////////////////////////////////////////////
+
+FORCE_INLINE pin_t alloc_pin(Jelly *c) {
+        uint32_t res = c->pins_count++;
+        uint32_t wid = c->pins_width;
+
+        if (res >= wid) {
+                wid = wid + (wid / 2);
+                c->pins = reallocarray(c->pins, wid, sizeof(c->pins[0]));
+                c->pins_width = wid;
+        }
+
+        return (pin_t){ .ix = res };
+}
+
+static InsertResult
+new_pin (Jelly *ctx, leaf_t leaf) {
+        hash256_t *hash = (hash256_t*) leaf.bytes;
+        pin_t pin = alloc_pin(ctx);
+        ctx->pins[pin.ix] = hash;
+        printf("\t\tNEW_LEAF: b%d\n", pin.ix);
+        return (InsertResult){ .offset = pin.ix, .val = TAG_PIN(pin) };
+}
+
+static treenode_value
+found_pin (Jelly *ctx, uint32_t offset) {
+        return TAG_PIN((pin_t){ .ix = offset });
+}
+
+workspace_t jelly_pin(Jelly *ctx, hash256_t *pin) {
+        printf("\tjelly_pin(hash=%lx)\n", pin->a);
+
+        uint64_t hash = pin->a;
+
+        return insert_indirect_leaf(ctx,
+            (IndirectInsertRequest){
+                .width = PIN_TAGGED_WIDTH(32),
+                .hash = hash,
+                .leaf = (leaf_t) { .width_bytes = 32, .bytes = (uint8_t*) pin },
+                .new_leaf = new_pin,
+                .found_leaf = found_pin,
+            }
+        );
 }
 
 
@@ -998,6 +1050,10 @@ void print_bar(Jelly *ctx, bar_t bar) {
         printf("\"");
 }
 
+void print_pin(Jelly *ctx, pin_t pin) {
+        hash256_t h = *(ctx->pins[pin.ix]);
+        printf("[%016lx-%016lx-%016lx-%016lx]", h.a, h.b, h.c, h.d);
+}
 
 void print_tree(Jelly*, treenode_t);
 
@@ -1088,7 +1144,7 @@ void jelly_debug(Jelly *ctx) {
                         } else if (type == 'b') {
                                 print_bar(ctx, (bar_t){ .ix = ent.offset });
                         } else {
-                                die("todo: pins\n");
+                                print_pin(ctx, (pin_t){ .ix = ent.offset });
                         }
                         if (width < 9) {
                                 uint64_t word = (uint64_t) ctx->nats[i].bytes;
