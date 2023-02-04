@@ -7,6 +7,7 @@
 
 #include "murmur3.h"
 #include "xxh3.h"
+#include "libbase58.h"
 
 
 // Internal murmur3 stuff //////////////////////////////////////////////////////
@@ -47,6 +48,8 @@ size_t hash_combine(uint64_t x, uint64_t y) {
 
 
 // Misc Bin ////////////////////////////////////////////////////////////////////
+
+#define die(...) (fprintf(stderr, __VA_ARGS__),exit(1))
 
 /*
         What is the byte-width of a 64-bit word?
@@ -164,6 +167,7 @@ typedef struct jelly_ctx {
     // Leaf Deduplication table.
     leaves_table_entry_t *leaves_table;
     uint32_t leaves_table_width;
+    uint32_t leaves_table_width_log2;
     uint32_t leaves_table_count;
 
 
@@ -265,14 +269,15 @@ Jelly *new_jelly_ctx () {
         res->nats_count = 0;
 
         // Deduplication table for leaves
-        res->leaves_table = calloc(32, sizeof(res->leaves_table[0]));
-        res->leaves_table_width = 32;
-        res->leaves_table_count = 0;
+        res->leaves_table            = calloc(64, sizeof(res->leaves_table[0]));
+        res->leaves_table_width      = 64;
+        res->leaves_table_width_log2 = 6;
+        res->leaves_table_count      = 0;
 
         // Array of duplicate tree-nodes (and the top-level node).  Each one
         // is an index into `treenodes`.
-        res->fans       = calloc(64, sizeof(res->fans[0]));
-        res->fans_width = 64;
+        res->fans       = calloc(16, sizeof(res->fans[0]));
+        res->fans_width = 16;
         res->fans_count = 0;
 
         return res;
@@ -385,22 +390,25 @@ typedef struct {
         treenode_value (*found_leaf)(Jelly*, uint32_t);
 } IndirectInsertRequest;
 
-void grow_leaves_if_full(Jelly *ctx) {
+void rehash_leaves_if_full(Jelly *ctx) {
         uint32_t wid = ctx->leaves_table_width;
         uint32_t num = ctx->leaves_table_count;
 
-        if ((num+1) >= wid) {
-                wid *= 2;
-                ctx->leaves_table_width = wid;
-                ctx->leaves_table = reallocarray
-                    ( ctx->leaves_table
-                    , wid
-                    , sizeof(leaves_table_entry_t)
-                    );
-                bzero( ctx->leaves_table + num
-                     , (wid - num) * sizeof(leaves_table_entry_t)
-                     );
-        }
+        // If capacity is >= 50%, resize.
+        if (num*2 < wid) return;
+
+        wid *= 2;
+
+        ctx->leaves_table_width = wid;
+        ctx->leaves_table_width_log2++;
+
+        leaves_table_entry_t *newtab = calloc(wid, sizeof(*newtab));
+
+        memcpy(newtab, ctx->leaves_table, wid*sizeof(*newtab));
+
+        free(ctx->leaves_table);
+
+        ctx->leaves_table = newtab;
 }
 
 workspace_t create_node(Jelly *ctx, uint64_t hash, uint32_t num_bytes, treenode_value val) {
@@ -418,7 +426,7 @@ workspace_t create_node(Jelly *ctx, uint64_t hash, uint32_t num_bytes, treenode_
         return res;
 }
 
-workspace_t packed_insert(Jelly *ctx, PackedInsertRequest req) {
+workspace_t insert_packed_leaf(Jelly *ctx, PackedInsertRequest req) {
         uint64_t tag   = (req.width.word >> 62);
         uint64_t bytes = (req.width.word << 2) >> 2;
 
@@ -430,6 +438,10 @@ workspace_t packed_insert(Jelly *ctx, PackedInsertRequest req) {
             req.word
         );
 
+        if (req.hash == 0) {
+                die("Broken invariant: hashes must be non-zero\n");
+        }
+
         /*
                 Do a linear-search over the leaves table, and use the
                 index of the corresponding nat, if we find one.
@@ -439,19 +451,26 @@ workspace_t packed_insert(Jelly *ctx, PackedInsertRequest req) {
                 around while were are inserting.
         */
 
-        grow_leaves_if_full(ctx);
+        rehash_leaves_if_full(ctx);
 
         leaves_table_entry_t *ent = NULL;
 
-        for (ent = ctx->leaves_table; ent->hash; ent++) {
+        uint32_t mask = (1U << ctx->leaves_table_width_log2) - 1;
+        uint32_t ix = 0;
+
+        for (;; ix = ((ix + 1) & mask)) {
+                ent = &(ctx->leaves_table[ix]);
+
+                if (ent->hash == 0) break;
+
                 bool match = ent->hash == req.hash &&
                              ent->width.word == req.width.word &&
                              ent->bytes == (uint8_t*) req.word;
 
-                if (match) {
-                        printf("\t\tMATCH: n%d\n", ent->offset);
-                        return create_node(ctx, req.hash, bytes, req.found_leaf(ctx, ent->offset));
-                }
+                if (!match) continue;
+
+                printf("\t\tMATCH: n%d\n", ent->offset);
+                return create_node(ctx, req.hash, bytes, req.found_leaf(ctx, ent->offset));
         }
 
         /*
@@ -486,18 +505,29 @@ workspace_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
         print_nat_leaf(ctx, req.leaf);
         printf(")\n");
 
+        if (req.hash == 0) {
+                die("Broken invariant: hashes must be non-zero\n");
+        }
+
         /*
                 Do a linear-search over the leaves table, and return the
                 index of the corresponding nat, if we find one.
         */
 
-        grow_leaves_if_full(ctx); // Make sure there is space to insert,
-                                  // if we do it later, we will invalidate
-                                  // our pointer.
+        rehash_leaves_if_full(ctx); // Make sure there is space to insert,
+                                    // if we do it later, we will invalidate
+                                    // our pointer.
 
         leaves_table_entry_t *ent;
 
-        for (ent = ctx->leaves_table; ent->hash; ent++) {
+        uint32_t mask = (1U << ctx->leaves_table_width_log2) - 1;
+        uint32_t ix = 0;
+
+        for (;; ix = ((ix + 1) & mask)) {
+                ent = &(ctx->leaves_table[ix]);
+
+                if (ent->hash == 0) break;
+
                 bool hit = (ent->hash == req.hash) && (ent->width.word == req.width.word);
                 if (!hit) continue;
 
@@ -570,7 +600,7 @@ FORCE_INLINE static workspace_t
 jelly_packed_nat(Jelly *ctx, uint32_t byte_width, uint64_t word) {
         printf("\tjelly_packed_nat(%lu, width=%u)\n", word, byte_width);
 
-        return packed_insert(ctx,
+        return insert_packed_leaf(ctx,
             (PackedInsertRequest){
                 .width = NAT_TAGGED_WIDTH(byte_width),
                 .hash = fmix64(word),
@@ -641,7 +671,7 @@ workspace_t jelly_bar(Jelly *ctx, leaf_t leaf) {
 
                 printf("\tjelly_packed_bar(%lu, width=%u)\n", word, leaf.width_bytes);
 
-                return packed_insert(ctx,
+                return insert_packed_leaf(ctx,
                     (PackedInsertRequest){
                         .width = BAR_TAGGED_WIDTH(leaf.width_bytes),
                         .hash = fmix64(word),
@@ -687,7 +717,7 @@ new_pin (Jelly *ctx, leaf_t leaf) {
         hash256_t *hash = (hash256_t*) leaf.bytes;
         pin_t pin = alloc_pin(ctx);
         ctx->pins[pin.ix] = hash;
-        printf("\t\tNEW_LEAF: b%d\n", pin.ix);
+        printf("\t\tNEW_LEAF: p%d\n", pin.ix);
         return (InsertResult){ .offset = pin.ix, .val = TAG_PIN(pin) };
 }
 
@@ -775,8 +805,6 @@ workspace_t jelly_cons(Jelly *ctx, workspace_t hed, workspace_t tel) {
 
 
 // Testing /////////////////////////////////////////////////////////////////////
-
-#define die(...) (fprintf(stderr, __VA_ARGS__),exit(1))
 
 uint8_t hex_value(char a, char b) {
     if (b == EOF) die("partial hex literal");
@@ -1056,9 +1084,13 @@ void print_bar(Jelly *ctx, bar_t bar) {
         printf("\"");
 }
 
-void print_pin(Jelly *ctx, pin_t pin) {
+size_t print_pin(Jelly *ctx, pin_t pin) {
         hash256_t h = *(ctx->pins[pin.ix]);
-        printf("[%016lx-%016lx-%016lx-%016lx]", h.a, h.b, h.c, h.d);
+        char tmp[256];
+        size_t output_size;
+        b58enc(tmp, &output_size, &h, 32);
+        printf("%s", tmp);
+        return output_size;
 }
 
 void print_tree(Jelly*, treenode_t);
@@ -1130,33 +1162,31 @@ void jelly_debug(Jelly *ctx) {
                        ctx->leaves_table_width,
                        ctx->leaves_table_count);
 
-                int num = ctx->leaves_table_count;
+                int wid = ctx->leaves_table_width;
 
-                for (int i=0; i<num; i++) {
+                for (int i=0; i<wid; i++) {
                         leaves_table_entry_t ent = ctx->leaves_table[i];
 
-                        uint64_t width = ((ent.width.word << 2) >> 2);
+                        // Empty slot
+                        if (ent.hash == 0) continue;
 
-                        char type;
                         switch (ent.width.word >> 62) {
-                            case 2:  type = 'p'; break;
-                            case 3:  type = 'b'; break;
-                            default: type = 'n'; break;
+                            case 2:
+                                printf("\t\t[%04d] p%d = ", i, ent.offset);
+                                print_pin(ctx, (pin_t){ .ix = ent.offset });
+                                break;
+                            case 3:
+                                printf("\t\t[%04d] b%d = ", i, ent.offset);
+                                print_bar(ctx, (bar_t){ .ix = ent.offset });
+                                break;
+                            default:
+                                printf("\t\t[%04d] n%d = ", i, ent.offset);
+                                print_nat(ctx, (nat_t){ .ix = ent.offset });
                         }
 
-                        printf("\t\t[%04d] %c%d = ", i, type, ent.offset);
-                        if (type == 'n') {
-                                print_nat(ctx, (nat_t){ .ix = ent.offset });
-                        } else if (type == 'b') {
-                                print_bar(ctx, (bar_t){ .ix = ent.offset });
-                        } else {
-                                print_pin(ctx, (pin_t){ .ix = ent.offset });
-                        }
-                        if (width < 9) {
-                                uint64_t word = (uint64_t) ctx->nats[i].bytes;
-                                if (word < 999) printf("\t");
-                        }
-                        printf("\t(hash=%lu, width=%lu)\n", ent.hash, width);
+                        uint64_t width = ((ent.width.word << 2) >> 2);
+                        printf("\n\t\t  width: %-4lu", width);
+                        printf("\n\t\t  hash: 0x%016lx\n", ent.hash);
                 }
         }
 
@@ -1243,8 +1273,8 @@ void jelly_debug(Jelly *ctx) {
 int main () {
         Jelly *ctx = new_jelly_ctx();
 
-        hash256_t dumb_hash_1 = { 65535, 65535, (0ULL - 1), 65535 };
-        hash256_t dumb_hash_2 = { 65535, 0, (0ULL - 1), (65535ULL << 12) };
+        hash256_t dumb_hash_1 = { fmix64(3), 65535, fmix64(9),  65536 };
+        hash256_t dumb_hash_2 = { fmix64(4), 0,     (0ULL - 1), (65535ULL << 12) };
         workspace_t top = read_some(ctx);
         workspace_t tmp = jelly_pin(ctx, &dumb_hash_1);
         top = jelly_cons(ctx, tmp, top);
