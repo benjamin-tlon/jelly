@@ -167,8 +167,8 @@ typedef struct jelly_ctx {
     // Leaf Deduplication table.
     leaves_table_entry_t *leaves_table;
     uint32_t leaves_table_width;
-    uint32_t leaves_table_width_log2;
     uint32_t leaves_table_count;
+    uint64_t leaves_table_width_mask;
 
 
     // Array of duplicate tree-nodes (and the top-level node).  Each one
@@ -269,9 +269,9 @@ Jelly *new_jelly_ctx () {
         res->nats_count = 0;
 
         // Deduplication table for leaves
-        res->leaves_table            = calloc(64, sizeof(res->leaves_table[0]));
-        res->leaves_table_width      = 64;
-        res->leaves_table_width_log2 = 6;
+        res->leaves_table            = calloc(4, sizeof(res->leaves_table[0]));
+        res->leaves_table_width      = 4;
+        res->leaves_table_width_mask = ((1 << 2) - 1);  //  ((2**2) - 1) -> 0b11
         res->leaves_table_count      = 0;
 
         // Array of duplicate tree-nodes (and the top-level node).  Each one
@@ -390,25 +390,65 @@ typedef struct {
         treenode_value (*found_leaf)(Jelly*, uint32_t);
 } IndirectInsertRequest;
 
+void jelly_debug_leaves(Jelly*);
+
 void rehash_leaves_if_full(Jelly *ctx) {
-        uint32_t wid = ctx->leaves_table_width;
-        uint32_t num = ctx->leaves_table_count;
+        uint32_t oldwid = ctx->leaves_table_width;
+        uint32_t num    = ctx->leaves_table_count;
 
         // If capacity is >= 50%, resize.
-        if (num*2 < wid) return;
+        if (num*2 < oldwid) return;
 
-        wid *= 2;
+        uint32_t newwid = oldwid*2;
 
-        ctx->leaves_table_width = wid;
-        ctx->leaves_table_width_log2++;
+        printf("rehash (old=%u new=%u)\n", oldwid, newwid);
 
-        leaves_table_entry_t *newtab = calloc(wid, sizeof(*newtab));
+        printf("OLD TABLE:\n");
+        jelly_debug_leaves(ctx);
 
-        memcpy(newtab, ctx->leaves_table, wid*sizeof(*newtab));
+        leaves_table_entry_t *oldtab = ctx->leaves_table;
+        leaves_table_entry_t *newtab = calloc(newwid, sizeof(*newtab));
+
+        printf("\tcalloc(%u * %lu = %lu)\n", newwid, sizeof(*newtab), newwid*sizeof(*newtab));
+
+        uint64_t newmask = (ctx->leaves_table_width_mask << 1) | 1;
+
+        printf("\tnewmask = %lu\n", newmask);
+
+        /*
+                Loop over the whole of oldtab, and re-insert every
+                non-empty slot.  Inserts are guarenteed to be unique,
+                so we just need to, starting at the correct bucket,
+                scan for an empty slot and write the value there.
+        */
+        for (uint64_t i=0; i<oldwid; i++) {
+                leaves_table_entry_t ent = oldtab[i];
+
+                uint64_t j = ent.hash;
+
+                if (j == 0) continue; // empty slot
+
+                for (;; j++) {
+                        j &= newmask;
+                        leaves_table_entry_t *tar = newtab + j;
+                        if (tar->hash == 0) {
+                                *tar = ent;
+                                printf("\t\t%lu -> %lu\n", i, j);
+                                break;
+                        } else {
+                                printf("\t\t\t(%lu -> %lu) is taken\n", i, j);
+                        }
+                }
+        }
 
         free(ctx->leaves_table);
 
-        ctx->leaves_table = newtab;
+        ctx->leaves_table_width      = newwid;
+        ctx->leaves_table_width_mask = newmask;
+        ctx->leaves_table            = newtab;
+
+        printf("NEW TABLE:\n");
+        jelly_debug_leaves(ctx);
 }
 
 workspace_t create_node(Jelly *ctx, uint64_t hash, uint32_t num_bytes, treenode_value val) {
@@ -455,10 +495,12 @@ workspace_t insert_packed_leaf(Jelly *ctx, PackedInsertRequest req) {
 
         leaves_table_entry_t *ent = NULL;
 
-        uint32_t mask = (1U << ctx->leaves_table_width_log2) - 1;
-        uint32_t ix = 0;
+        uint64_t mask = ctx->leaves_table_width_mask;
+        uint64_t ix = req.hash;
 
-        for (;; ix = ((ix + 1) & mask)) {
+        for (;; ix++) {
+                ix &= mask;
+
                 ent = &(ctx->leaves_table[ix]);
 
                 if (ent->hash == 0) break;
@@ -520,10 +562,12 @@ workspace_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
 
         leaves_table_entry_t *ent;
 
-        uint32_t mask = (1U << ctx->leaves_table_width_log2) - 1;
-        uint32_t ix = 0;
+        uint64_t mask = ctx->leaves_table_width_mask;
+        uint64_t ix = req.hash;
 
-        for (;; ix = ((ix + 1) & mask)) {
+        for (;; ix++) {
+                ix &= mask;
+
                 ent = &(ctx->leaves_table[ix]);
 
                 if (ent->hash == 0) break;
@@ -1141,6 +1185,39 @@ int treenode_depth(Jelly *ctx, treenode_t node) {
         return (1 + ((hed_depth > tel_depth) ? hed_depth : tel_depth));
 }
 
+void jelly_debug_leaves(Jelly *ctx) {
+        printf("\n\tleaves: (width=%u, count=%u)\n\n",
+               ctx->leaves_table_width,
+               ctx->leaves_table_count);
+
+        int wid = ctx->leaves_table_width;
+
+        for (int i=0; i<wid; i++) {
+                leaves_table_entry_t ent = ctx->leaves_table[i];
+
+                // Empty slot
+                if (ent.hash == 0) continue;
+
+                switch (ent.width.word >> 62) {
+                    case 2:
+                        printf("\t\t[%04d] p%d = ", i, ent.offset);
+                        print_pin(ctx, (pin_t){ .ix = ent.offset });
+                        break;
+                    case 3:
+                        printf("\t\t[%04d] b%d = ", i, ent.offset);
+                        print_bar(ctx, (bar_t){ .ix = ent.offset });
+                        break;
+                    default:
+                        printf("\t\t[%04d] n%d = ", i, ent.offset);
+                        print_nat(ctx, (nat_t){ .ix = ent.offset });
+                }
+
+                uint64_t width = ((ent.width.word << 2) >> 2);
+                printf("\n\t\t  width: %-4lu", width);
+                printf("\n\t\t  hash: 0x%016lx\n", ent.hash);
+        }
+}
+
 void jelly_debug(Jelly *ctx) {
         printf("\njelly_debug():\n");
 
@@ -1157,38 +1234,7 @@ void jelly_debug(Jelly *ctx) {
                        free_workspaces);
         }
 
-        {
-                printf("\n\tleaves: (width=%u, count=%u)\n\n",
-                       ctx->leaves_table_width,
-                       ctx->leaves_table_count);
-
-                int wid = ctx->leaves_table_width;
-
-                for (int i=0; i<wid; i++) {
-                        leaves_table_entry_t ent = ctx->leaves_table[i];
-
-                        // Empty slot
-                        if (ent.hash == 0) continue;
-
-                        switch (ent.width.word >> 62) {
-                            case 2:
-                                printf("\t\t[%04d] p%d = ", i, ent.offset);
-                                print_pin(ctx, (pin_t){ .ix = ent.offset });
-                                break;
-                            case 3:
-                                printf("\t\t[%04d] b%d = ", i, ent.offset);
-                                print_bar(ctx, (bar_t){ .ix = ent.offset });
-                                break;
-                            default:
-                                printf("\t\t[%04d] n%d = ", i, ent.offset);
-                                print_nat(ctx, (nat_t){ .ix = ent.offset });
-                        }
-
-                        uint64_t width = ((ent.width.word << 2) >> 2);
-                        printf("\n\t\t  width: %-4lu", width);
-                        printf("\n\t\t  hash: 0x%016lx\n", ent.hash);
-                }
-        }
+        jelly_debug_leaves(ctx);
 
         uint32_t count = ctx->fans_count;
 
@@ -1273,8 +1319,8 @@ void jelly_debug(Jelly *ctx) {
 int main () {
         Jelly *ctx = new_jelly_ctx();
 
-        hash256_t dumb_hash_1 = { fmix64(3), 65535, fmix64(9),  65536 };
-        hash256_t dumb_hash_2 = { fmix64(4), 0,     (0ULL - 1), (65535ULL << 12) };
+        hash256_t dumb_hash_1 = { fmix64(111111), fmix64(65535), fmix64(9),  65536 };
+        hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
         workspace_t top = read_some(ctx);
         workspace_t tmp = jelly_pin(ctx, &dumb_hash_1);
         top = jelly_cons(ctx, tmp, top);
