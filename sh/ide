@@ -1,6 +1,6 @@
 #!/usr/bin/env bash 
 
-INPUT='(3 (0 0 3 0 44 55) (0 0 3 0 44 55) 0x04 0x99 0xff 0xff 1000 0xdeadbeef 0xdeadbeef77deadbeef 0x112233445566778899 0x112233445566778899)'
+INPUT='(3 (0 0 3 0 44 55) (0 0 3 0 44 55) 0x04 ("foo" "foo" "foo") "abcdefghijklmnopqrstuvwxyz" "abcdefghijklmnopqrstuvwxyz" 0x99 0xff 0xff 1000 0xdeadbeef 0xdeadbeef77deadbeef 0x112233445566778899 0x112233445566778899)'
 
 clear
 make && ./a.out <<<"$INPUT"
