@@ -1,56 +1,20 @@
--   TODO Make sure no leaf-hash is every zero.
+-   TODO Make sure no entity hash is ever zero.
 
 -   TODO The front-end should own all the binary data for bars, bignats,
-    and pins.
+    and pins.  It shouldn't be freed with the Jelly* context, and instead
+    should be freed directly from main().
 
-    That data should not be freed with the context.
+-   TODO The `leaf_table_insert` routines (direct and indirect) should
+    be passed a continuation.
 
--   TODO Maybe we should have a single `leaves` array, and have each
-    be tagged with it's type.
+    This way the type-specific logic can be factored out.  The overhead
+    of an indirect call should be minor, since we are only doing it once
+    per (unique) leaf.
 
-    This would simplify the code for deduplication of naturals, at the
-    expense of slightly worse bucketing.
+-   DONE: Support bars.
+-   TODO: Support pins.
 
-    Instead of having a table of words, a table of pins, a table of bars,
-    and a table of nats, we would have a table of tagged leaves:
-
-        struct leaves_table_entry {
-            uint64_t hash;
-            tagged_width_t width;
-            uint8_t *bytes;
-            int64_t offset; // Index into pins/bars/nats (depending on the tag).
-        }
-
-    So, you would hash, tag the width, calculate the starting offset,
-    and then just scan the table.
-
-    The duplicates case would be slightly slower for direct words, but
-    not much.  The `bytes` field would still be inline, and we would have
-    a custom code-path for searching for data the fits in a word.
-
-    In the search-for-word path, we would ignore the hash and just
-    directly compare the `bytes` and `width` fields.  Most failing cases
-    are still only one compare, successful cases is two comparisions.
-
-    It also doubles the width of the words table, but it saves us from
-    needing to be constantly searching accross four tables, which has
-    worse memory locality.
-
-    This is also slightly slower for pins, but barely.  The hash (just
-    the first word of the pin) will almost never match for equal values,
-    so we get single-compare checks in most cases.  A successful compare
-    is (hash + tagged_width + bytes[1] + bytes[2] + bytes[3]).
-
-    Yeah, that's interesting, we can still have specialized insert logic
-    per-type, but still have a single data structure, a single routine
-    to grow hash tables, etc.
-
-            uint64_t hash;
-            tagged_width_t width;
-            uint8_t *bytes;
-            int64_t offset; // Index into pins/bars/nats (depending on the tag).
-
--   TODO: Decide about details of hash table implementation.
+-   TODO: Make the leaves table into an actual hash table.
 
     Hash table capacity will be a power of two.
 
@@ -82,13 +46,9 @@
     The specifics of FOUND and INSERT are specialized per entry-type,
     but the rest of the logic stays the same.
 
+-   TODO: Make the leaves table into an actual hash table.
+
 ## Deduplication
-
--   TODO Deduplication support for large nats.
--   TODO Parser/printer support for large nats.
-
--   TODO Deduplication support for bars.
--   TODO Parser/printer support for bars.
 
 -   TODO Deduplication support for pins.
 -   TODO Parser/printer support for pins.
