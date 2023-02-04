@@ -231,6 +231,11 @@ FORCE_INLINE bar_t TREENODE_VAL_BAR(treenode_value v) {
         return (bar_t){ .ix = (uint32_t) v.word };
 }
 
+// We rely on the cast to drop the high-bits.
+FORCE_INLINE pin_t TREENODE_VAL_PIN(treenode_value v) {
+        return (pin_t){ .ix = (uint32_t) v.word };
+}
+
 // Memory Management ///////////////////////////////////////////////////////////
 
 Jelly *new_jelly_ctx () {
@@ -695,6 +700,7 @@ workspace_t jelly_pin(Jelly *ctx, hash256_t *pin) {
         printf("\tjelly_pin(hash=%lx)\n", pin->a);
 
         uint64_t hash = pin->a;
+        hash += !hash;
 
         return insert_indirect_leaf(ctx,
             (IndirectInsertRequest){
@@ -1061,7 +1067,7 @@ void print_tree_list(Jelly *ctx, treenode_t tree) {
         treenode_value val = ctx->treenodes[tree.ix];
 
         switch (TREENODE_VAL_TAG(val)) {
-            case 4: printf("pin"); break;
+            case 4: print_pin(ctx, TREENODE_VAL_PIN(val)); break;
             case 5: print_bar(ctx, TREENODE_VAL_BAR(val)); break;
             case 6: print_nat(ctx, TREENODE_VAL_NAT(val)); break;
             case 7: printf("fan"); break;
@@ -1079,7 +1085,7 @@ void print_tree(Jelly *ctx, treenode_t tree) {
         treenode_value val = ctx->treenodes[tree.ix];
 
         switch (TREENODE_VAL_TAG(val)) {
-            case 4: printf("pin"); break;
+            case 4: print_pin(ctx, TREENODE_VAL_PIN(val)); break;
             case 5: print_bar(ctx, TREENODE_VAL_BAR(val)); break;
             case 6: print_nat(ctx, TREENODE_VAL_NAT(val)); break;
             case 7: printf("fan"); break;
@@ -1157,6 +1163,19 @@ void jelly_debug(Jelly *ctx) {
         uint32_t count = ctx->fans_count;
 
         {
+                printf("\n\tpins: (width=%u, count=%u)\n\n",
+                       ctx->pins_width,
+                       ctx->pins_count);
+                int num = ctx->pins_count;
+                for (int i=0; i<num; i++) {
+                        printf("\t\tb%d = ", i);
+                        print_pin(ctx, (pin_t){ .ix = i });
+                        printf("\n");
+                }
+        }
+
+
+        {
                 printf("\n\tbars: (width=%u, count=%u)\n\n",
                        ctx->bars_width,
                        ctx->bars_count);
@@ -1224,7 +1243,16 @@ void jelly_debug(Jelly *ctx) {
 int main () {
         Jelly *ctx = new_jelly_ctx();
 
+        hash256_t dumb_hash_1 = { 65535, 65535, (0ULL - 1), 65535 };
+        hash256_t dumb_hash_2 = { 65535, 0, (0ULL - 1), (65535ULL << 12) };
         workspace_t top = read_some(ctx);
+        workspace_t tmp = jelly_pin(ctx, &dumb_hash_1);
+        top = jelly_cons(ctx, tmp, top);
+        tmp = jelly_pin(ctx, &dumb_hash_1);
+        top = jelly_cons(ctx, tmp, top);
+        tmp = jelly_pin(ctx, &dumb_hash_2);
+        top = jelly_cons(ctx, tmp, top);
+
         jelly_push_final(ctx, top);
         free_workspace(ctx, top);
 
