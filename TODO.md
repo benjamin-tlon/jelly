@@ -12,7 +12,8 @@
     per (unique) leaf.
 
 -   DONE: Support bars.
--   TODO: Support pins.
+-   DONE: Support pins.
+-   DONE: Syntax for pins.
 
 -   TODO: Make the leaves table into an actual hash table.
 
@@ -46,11 +47,10 @@
     The specifics of FOUND and INSERT are specialized per entry-type,
     but the rest of the logic stays the same.
 
--   TODO: Make the leaves table into an actual hash table.
 
 ## Deduplication
 
--   TODO Deduplication support for pins.
+-   DONE Deduplication support for pins.
 -   TODO Parser/printer support for pins.
 
 -   TODO Deduplication support for fan backreferences.
