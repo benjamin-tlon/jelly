@@ -1058,11 +1058,11 @@ treenode_t read_one(Jelly *ctx) {
 }
 
 int jelly_buffer_size(Jelly *ctx) {
-        return 1 + strlen("\n\nGet fucked, lol\n\n");
+        return 1 + strlen("\n\nTODO\n\n");
 }
 
 void jelly_dump(Jelly *ctx, uint8_t *buf) {
-        strcpy((char*)buf, "\n\nGet fucked, lol\n\n");
+        strcpy((char*)buf, "\n\nTODO\n\n");
 }
 
 void jelly_push_final(Jelly *ctx, treenode_t val) {

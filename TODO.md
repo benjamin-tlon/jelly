@@ -13,162 +13,42 @@
 -   DONE Internior nodes table.
 -   DONE treenode_equals
 -   DONE Interior node deduplication
--   TODO Fan backrefs.
+
 -   TODO Printer shows backreferenes table.
 
+-   TODO Fan backrefs.
+
+    Whenever we find a backreference:
+
+    -   Append a new new `treenode_value` into the backreferences table.
+
+        -   (Make sure that the printer can follow the chain of references
+            between the two tables).
+
+    -   Overwrite the `treenode_t` that was found, with a new
+        backreference (f5).
+
 -   TODO Calculate resulting buffer size.
+
+    -   The logic for this exists already, I think as a comment in the
+        Haskell code?
+
 -   TODO Actually serialize.
+
 -   TODO Deserialize to a fresh jelly context.
+
+    -   Just read each leaf, and append directly to the respective tables
+        (do not populate the dedupe tables, just assume they are unique).
+
+    -   Then, read each fan.
+
+    -   Then, read each fan.  All references get looked up in the
+        prior tables.
+
 -   TODO Final test-harness print should be the deserialized context.
 
 
 ## Misc
-
--   DONE Q: Can we reclaim space when we find duplicates?
-
-    When we find a duplicate tree-node and turn that into a
-    back-reference, all of the nodes in the duplicate tree "leak".
-    They take up space, but will never be referenced.
-
-    Can we immediatly release them, and re-use that space?
-
-    Intuitively, these nodes should be the *last n* nodes for some value
-    of `n`, in which case, we could simply decrease the "used" count.
-
-    Is that true?  And if so, what is the that of n?
-
-    is is `F(num_leaves)` for some function F?
-
-    Let's look at an example:
-
-        #((0 0) (0 0))    ->
-        (#(0 0) (0 0))    ->
-        ((#0 0) (0 0))    ->    []                  n0=0
-        ((0 #0) (0 0))    ->    []                  n0=0 n0=0
-        ((0 0) #(0 0))    ->    []                  n0=0 n0=0 (0,1)
-        ((0 0) (#0 0))    ->    []                  n0=0 n0=0 (0,1)
-        ((0 0) (0 #0))    ->    []                  n0=0 n0=0 (0,1) n0=0 n0=0
-        ((0 0) ^(0 0))    ->    []                  n0=0 n0=0 (0,1) n0=0 n0=0 (0,1)
-
-                          ->    [f0=(0,1)]          n0=0 n0=0 {f0} n0=0 n0=0 f0
-                          ->    [f0=(0,1)]          n0=0 n0=0 f0 {n0=0 n0=0 f0}
-                          ->    [f0=(0,1)]          n0=0 n0=0 f0
-                 [here, 3 nodes can be reclaimed (2*2 - 1)]
-                 [And they are the last 3 nodes]
-                 [So, indeed, pop((leaves*2)-1) seems to work]
-
-        ^((0 0) (0 0))    ->    [f0=(0,1)]          n0=0 n0=0 f0
-        ^((0 0) (0 0))    ->    [f0=(0,1) f1=(2,2)] n0=0 n0=0 f0 (2,2)
-
-    So, first of all: yes that seems to work great.
-
-    But also, it seems like we're missing an opportunity to apply the
-    same logic to matching laves.  Why duplicate those nodes?
-
-        #((0 0) (0 0))    ->
-        (#(0 0) (0 0))    ->
-        ((^0 0) (0 0))    -> t:{0:n0}
-        ((t0 ^0) (0 0))   -> t:{0:n0}
-        (^(t0 t0) (0 0))  -> t:{0:n0, 1:(t0 t0)}
-        (t1 #(0 0))       -> t:{0:n0, 1:(t0 t0)}
-        (t1 (^0 0))       -> t:{0:n0, 1:(t0 t0)}
-        (t1 (t0 ^0))      -> t:{0:n0, 1:(t0 t0)}
-        ^(t1 t1)          -> t:{0:n0, 1:(t0 t0)}
-        t2                -> t:{0:n0, 1:(t0 t0), 2:(t1 t1)}
-
-    Alright, sick.  That seems quite possible.
-
-    However, the number of nodes to release upon (interior-node-match)
-    is now more complicated, since we didn't allocate every leaf.
-
-    So, what we really want, I think, is to track the number of treenodes
-    that have been allocated by this particular recursion-point.
-
-    That goes up when we allocate a node (find a unique leaf or unique
-    pair).  Whenever we find a matching tree, we pop(n) for the number
-    of allocations that we own.
-
-    Simple!
-
-    This optimization will not only avoid wasting memory, but it will
-    also improve the memory locality of node-equality tests.
-
-    Furthermore, I believe it can maybe let us short-circuit tree-equality
-    checks, since every equal sub-node will always be pointer-equals
-    (except for the top-most newly-allocated entry).
-
-        For example, if we are comparing:
-
-            ((0 1) (2 3))
-
-        with
-
-            ((0 1) (2 3))
-
-        Then we will have already compared (0 1) and (2 3) for equality.
-
-        So, we are actually just comparing:
-
-            (f0 f1) against (f0 f1)
-
-        If we ever ask if two sub-cells are equal, we automatically
-        know they are NOT EQUAL, since they would already be (equal)
-        backreferences if they were equal trees.
-
-        This allows us to completely short-circuit the equality check.
-
-        Yes, I think even the treenode_value_t (packed word) will be
-        directly word-equals if the two trees are equal.
-
-        Let's go through the example again:
-
-            #((4 8) (4 8))    -> 
-            (#(4 8) (4 8))    -> 
-            ((@0 ^8) (4 8))   ->  n:{4}   t:{n0}
-            (^(@0 @1) (4 8))  ->  n:{4 8} t:{n0 n1}
-            (@2 #(4 8))       ->  n:{4 8} t:{n0 n1 {0,1}}
-            (@2 (^4 8))       ->  n:{4 8} t:{n0 n1 {0,1}}
-            (@2 (@0 ^8))      ->  n:{4 8} t:{n0 n1 {0,1}}
-            (@2 ^(@0 @1))     ->  n:{4 8} t:{n0 n1 {0,1}}
-                                                           Here we see
-                                                           that we are
-                                                           comparing {0,1}
-                                                           with {0,1},
-                                                           which is a
-                                                           word-equal
-                                                           comparison.
-            (@2 @2)           ->  n:{4 8} b:{(0,1)} t:{n0 n1 b0}
-
-    Conclusion:
-
-        The internal-nodes deduplication table need only be:
-
-            HashMap (Word32, Word32) Int
-
-        Even the mutation that happens when a backreference was found
-        does not invalidate this key, because the value that it matches
-        against is still an (x,y) pair.
-
-        We can implement this in C as:
-
-            //
-            // Use pair = UINT64_MAX to indicate an empty
-            // marker.  Use `memset(buf, 255, size)` to initialize.
-            //
-            // The `hash` field is only used for re-hashing (growing
-            // the table).  When we scan the table we only ask:
-            //
-            //     NodeEntry *cur = ctx->node_table + i;
-            //     uint64_t pair = cur->pair
-            //     if (pair == target || pair == UINT64_MAX) {
-            //             return cur;
-            //     }
-            //
-            typedef struct {
-                uint64_t pair;
-                uint32_t hash;    // fmix64 truncated to 32 bits.
-                uint32_t offset;
-            } NodeEntry;
 
 -   TODO Parser support for pins.
 
@@ -176,7 +56,16 @@
 
     -   TODO Is there some other field we could look at?
 
-    -   TODO This is an annoying invariant to enforce, error-prone.
+        -   `uint64_t hash`: We can artificially force this to be non-zero.
+
+        -   `tagged_width_t width`: Zero values have zero width.
+
+        -   `uint8_t *bytes`: Zero values correspond to a NULL value here.
+
+        -   `treenode_t pointer`: The first treenode always has value zero.
+
+        How about (pointer.ix == UINT32_MAX)?  And then we can memset
+        like we do with the other table.
 
 -   TODO The front-end should own all the binary data for bars, bignats,
     and pins.  It shouldn't be freed with the Jelly* context, and instead
