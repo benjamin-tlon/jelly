@@ -268,10 +268,10 @@ Jelly *new_jelly_ctx () {
         res->leaves_table_count = 0;
 
         // Deduplication table for interior nodes
-        size_t nodes_table_byte_width = (1<<10) * sizeof(res->nodes_table[0]);
+        size_t nodes_table_byte_width = (1<<2) * sizeof(res->nodes_table[0]);
         res->nodes_table       = malloc(nodes_table_byte_width);
-        res->nodes_table_width = (1<<10);
-        res->nodes_table_mask  = ((1<<10) - 1);
+        res->nodes_table_width = (1<<2);
+        res->nodes_table_mask  = ((1<<2) - 1);
         res->nodes_table_count = 0;
 
         memset(res->nodes_table, 255, nodes_table_byte_width);
@@ -354,16 +354,67 @@ typedef struct {
         treenode_t (*new_leaf)(Jelly*, leaf_t);
 } IndirectInsertRequest;
 
-void jelly_debug_leaves(Jelly*);
+void jelly_debug_leaves(Jelly*, bool);
 void jelly_debug_interior_nodes(Jelly*);
 
 void rehash_nodes_if_full(Jelly *ctx) {
-        uint32_t num = ctx->nodes_table_count;
-        uint32_t wid = ctx->nodes_table_width;
+        uint32_t oldwid = ctx->nodes_table_width;
+        uint32_t num    = ctx->nodes_table_count;
 
-        if (num*2 >= wid) {
-                die("resize nodes table\n");
+        // If capacity is >= 50%, resize.
+        if (num*2 < oldwid) return;
+
+        uint32_t newwid = oldwid*2;
+
+        printf("rehash (old=%u new=%u)\n", oldwid, newwid);
+
+        // printf("OLD TABLE:\n");
+        // jelly_debug_interior_nodes(ctx);
+        // printf("\n");
+
+        FanEntry *oldtab = ctx->nodes_table;
+        FanEntry *newtab = malloc(newwid * sizeof(*newtab));
+
+        memset(newtab, 255, newwid * sizeof(*newtab));
+
+        // e.g. 0b111 -> 0b1111
+        uint64_t newmask = (ctx->nodes_table_mask << 1) | 1;
+
+        /*
+                Loop over the whole of oldtab, and re-insert every
+                non-empty slot.  Inserts are guarenteed to be unique,
+                so we just need to, starting at the correct bucket,
+                scan for an empty slot and write the value there.
+        */
+        for (uint64_t i=0; i<oldwid; i++) {
+                FanEntry ent = oldtab[i];
+
+                uint64_t j = ent.hash;
+
+                if (ent.val.word == UINT64_MAX) continue; // empty slot
+
+                for (;; j++) {
+                        j &= newmask;
+                        FanEntry *tar = newtab + j;
+                        if (tar->val.word == UINT64_MAX) {
+                                *tar = ent;
+                                // printf("\t\t%lu -> %lu\n", i, j);
+                                break;
+                        } // else {
+                                // printf("\t\t\t(%lu -> %lu) is taken\n", i, j);
+                        // }
+                }
         }
+
+        free(ctx->nodes_table);
+
+        ctx->nodes_table_width = newwid;
+        ctx->nodes_table_mask  = newmask;
+        ctx->nodes_table       = newtab;
+
+        // printf("NEW TABLE:\n");
+        // jelly_debug_interior_nodes(ctx);
+        // printf("\n");
 }
 
 void rehash_leaves_if_full(Jelly *ctx) {
@@ -377,18 +428,17 @@ void rehash_leaves_if_full(Jelly *ctx) {
 
         printf("rehash (old=%u new=%u)\n", oldwid, newwid);
 
-        printf("OLD TABLE:\n");
-        jelly_debug_leaves(ctx);
+        // printf("OLD TABLE:\n");
+        // jelly_debug_leaves(ctx, false);
+        // printf("\n");
 
         leaves_table_entry_t *oldtab = ctx->leaves_table;
         leaves_table_entry_t *newtab = calloc(newwid, sizeof(*newtab));
 
-        printf("\tcalloc(%u * %lu = %lu)\n", newwid, sizeof(*newtab), newwid*sizeof(*newtab));
+        // printf("\tcalloc(%u * %lu = %lu)\n", newwid, sizeof(*newtab), newwid*sizeof(*newtab));
 
         // e.g. 0b111 -> 0b1111
         uint64_t newmask = (ctx->leaves_table_mask << 1) | 1;
-
-        printf("\tnewmask = %lu\n", newmask);
 
         /*
                 Loop over the whole of oldtab, and re-insert every
@@ -408,11 +458,11 @@ void rehash_leaves_if_full(Jelly *ctx) {
                         leaves_table_entry_t *tar = newtab + j;
                         if (tar->hash == 0) {
                                 *tar = ent;
-                                printf("\t\t%lu -> %lu\n", i, j);
+                                // printf("\t\t%lu -> %lu\n", i, j);
                                 break;
-                        } else {
-                                printf("\t\t\t(%lu -> %lu) is taken\n", i, j);
-                        }
+                        } // else {
+                                // printf("\t\t\t(%lu -> %lu) is taken\n", i, j);
+                        // }
                 }
         }
 
@@ -422,8 +472,9 @@ void rehash_leaves_if_full(Jelly *ctx) {
         ctx->leaves_table_mask  = newmask;
         ctx->leaves_table       = newtab;
 
-        printf("NEW TABLE:\n");
-        jelly_debug_leaves(ctx);
+        // printf("NEW TABLE:\n");
+        // jelly_debug_leaves(ctx, false);
+        // printf("\n");
 }
 
 
@@ -762,7 +813,7 @@ treenode_t jelly_cons(Jelly *ctx, treenode_t hed, treenode_t tel) {
                 uint64_t word = cur->val.word;
 
                 if (word == target) {
-                        printf("\t\tTREE MATCH @[%04d] = ", cur->pointer.ix);
+                        printf("\t\tTREE MATCH @[%4d] = ", cur->pointer.ix);
                         print_tree(ctx, cur->pointer);
                         printf("\n");
 
@@ -1164,10 +1215,11 @@ int treenode_depth(Jelly *ctx, treenode_t node) {
         return (1 + ((hed_depth > tel_depth) ? hed_depth : tel_depth));
 }
 
-void jelly_debug_leaves(Jelly *ctx) {
-        printf("\n\tleaves: (width=%u, count=%u)\n\n",
+void jelly_debug_leaves(Jelly *ctx, bool details) {
+        printf("\n\tleaves: (width=%u, count=%u, mask=%lu)\n\n",
                ctx->leaves_table_width,
-               ctx->leaves_table_count);
+               ctx->leaves_table_count,
+               ctx->leaves_table_mask);
 
         int wid = ctx->leaves_table_width;
 
@@ -1179,25 +1231,29 @@ void jelly_debug_leaves(Jelly *ctx) {
                 // Empty slot
                 if (ent.hash == 0) continue;
 
-                printf("\t\t[%04d] ", i);
+                printf("\t\t%4d = ", i);
                 print_tree_outline(ctx, ent.pointer);
-                printf(" = ");
+                printf("\t(val=");
                 print_tree(ctx, ent.pointer);
+                printf(")\n");
 
-                uint64_t width = ((ent.width.word << 2) >> 2);
-                uint64_t bin = ent.hash & mask;
-                uint64_t distance = (((uint64_t)i) - bin);
-                printf("\n\t\t    bytes: %-4lu", width);
-                printf("\n\t\t    bin: %lu [dist=%lu]", bin, distance);
-                printf("\n\t\t    hash: 0x%016lx\n", ent.hash);
+                if (details) {
+                        uint64_t width = ((ent.width.word << 2) >> 2);
+                        uint64_t bin = ent.hash & mask;
+                        uint64_t distance = (((uint64_t)i) - bin);
+                        printf("\t\t    bytes: %-4lu\n", width);
+                        printf("\t\t    bin: %lu [dist=%lu]\n", bin, distance);
+                        printf("\t\t    hash: 0x%016lx\n", ent.hash);
+                }
         }
 }
 
 
 void jelly_debug_interior_nodes(Jelly *ctx) {
-        printf("\n\tinterior_nodes_table: (width=%u, count=%u)\n\n",
+        printf("\n\tinterior_nodes_table: (width=%u, count=%u, mask=%lu)\n\n",
                ctx->nodes_table_width,
-               ctx->nodes_table_count);
+               ctx->nodes_table_count,
+               ctx->nodes_table_mask);
 
         int wid = ctx->nodes_table_width;
 
@@ -1212,7 +1268,7 @@ void jelly_debug_interior_nodes(Jelly *ctx) {
                 uint64_t bin = ent.hash & mask;
                 uint64_t distance = (((uint64_t)i) - bin);
 
-                printf("\t\t[%04d] = @%u\tbin=%lu\tdist=%lu\thash=%08x\n", i, ent.pointer.ix, bin, distance, ent.hash);
+                printf("\t\t%4d = @%u\tbin=%lu\tdist=%lu\thash=%08x\n", i, ent.pointer.ix, bin, distance, ent.hash);
 
                 // printf("\n\n\t\t  ");
                 // print_tree(ctx, ent.pointer);
@@ -1225,7 +1281,7 @@ void jelly_debug_interior_nodes(Jelly *ctx) {
 void jelly_debug(Jelly *ctx) {
         printf("\njelly_debug():\n");
 
-        jelly_debug_leaves(ctx);
+        jelly_debug_leaves(ctx, false);
 
         jelly_debug_interior_nodes(ctx);
 
@@ -1237,7 +1293,7 @@ void jelly_debug(Jelly *ctx) {
                        ctx->pins_count);
                 int num = ctx->pins_count;
                 for (int i=0; i<num; i++) {
-                        printf("\t\tb%d = ", i);
+                        printf("\t\tp%d = ", i);
                         print_pin(ctx, (pin_t){ .ix = i });
                         printf("\n");
                 }
@@ -1278,21 +1334,21 @@ void jelly_debug(Jelly *ctx) {
                         treenode_value val = ctx->treenodes[i];
                         switch (val.word >> 61) {
                             case 4:
-                                printf("\t\t[%04d]: p%u\n", i, (uint32_t) val.word);
+                                printf("\t\tt%d = p%u\n", i, (uint32_t) val.word);
                                 continue;
                             case 5:
-                                printf("\t\t[%04d]: b%u\n", i, (uint32_t) val.word);
+                                printf("\t\tt%d = b%u\n", i, (uint32_t) val.word);
                                 continue;
                             case 6:
-                                printf("\t\t[%04d]: n%u\n", i, (uint32_t) val.word);
+                                printf("\t\tt%d = n%u\n", i, (uint32_t) val.word);
                                 continue;
                             case 7:
-                                printf("\t\t[%04d]: f%u\n", i, (uint32_t) val.word);
+                                printf("\t\tt%d = f%u\n", i, (uint32_t) val.word);
                                 continue;
                             default: {
                                 treenode_t hed = NODEVAL_HEAD(val);
                                 treenode_t tel = NODEVAL_TAIL(val);
-                                printf("\t\t[%04d]: (%u, %u)\n", i, hed.ix, tel.ix);
+                                printf("\t\tt%d = (%u, %u)\n", i, hed.ix, tel.ix);
                                 continue;
                             }
                         }
