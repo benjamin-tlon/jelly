@@ -85,8 +85,13 @@ typedef struct hash256 {
 typedef struct { uint32_t ix; } pin_t;        //  Index into Jelly.pins
 typedef struct { uint32_t ix; } bar_t;        //  Index into Jelly.bars
 typedef struct { uint32_t ix; } nat_t;        //  Index into Jelly.nats
-typedef struct { uint32_t ix; } fan_t;        //  Index into Jelly.fans
+typedef struct { uint32_t ix; } frag_t;       //  Index into Jelly.frags
 typedef struct { uint32_t ix; } treenode_t;   //  Index into Jelly.treenodes
+
+typedef struct fragment {
+        treenode_t head;
+        treenode_t tail;
+} FragVal;
 
 typedef struct treenode_value {
         uint64_t word;
@@ -164,17 +169,17 @@ typedef struct jelly_ctx {
 
     // Array of duplicate tree-nodes (and the top-level node).  Each one
     // is an index into `treenodes`.
-    treenode_t *fans;
-    uint32_t fans_width;
-    uint32_t fans_count;
+    FragVal *frags;
+    uint32_t frags_width;
+    uint32_t frags_count;
 } Jelly;
 
 void print_tree_outline(Jelly*, treenode_t);
 void print_tree(Jelly*, treenode_t);
 
 
-FORCE_INLINE treenode_value TAG_FAN(fan_t fan) {
-        uint64_t index = (uint64_t) fan.ix;
+FORCE_INLINE treenode_value TAG_FRAG(frag_t frag) {
+        uint64_t index = (uint64_t) frag.ix;
         uint64_t word  = (index | 7ULL << 61);
         return (treenode_value){ word };
 }
@@ -223,6 +228,11 @@ FORCE_INLINE treenode_t NODEVAL_TAIL(treenode_value v) {
 // We rely on the cast to drop the high-bits.
 FORCE_INLINE nat_t NODEVAL_NAT(treenode_value v) {
         return (nat_t){ .ix = (uint32_t) v.word };
+}
+
+// We rely on the cast to drop the high-bits.
+FORCE_INLINE frag_t NODEVAL_FRAG(treenode_value v) {
+        return (frag_t){ .ix = (uint32_t) v.word };
 }
 
 // We rely on the cast to drop the high-bits.
@@ -275,9 +285,9 @@ Jelly *new_jelly_ctx () {
 
         // Array of duplicate tree-nodes (and the top-level node).  Each one
         // is an index into `treenodes`.
-        res->fans       = calloc(16, sizeof(res->fans[0]));
-        res->fans_width = 16;
-        res->fans_count = 0;
+        res->frags       = calloc(16, sizeof(res->frags[0]));
+        res->frags_width = 16;
+        res->frags_count = 0;
 
         return res;
 }
@@ -289,7 +299,7 @@ void free_jelly_ctx (Jelly *ctx) {
         free(ctx->nats);
         free(ctx->leaves_table);
         free(ctx->nodes_table);
-        free(ctx->fans);
+        free(ctx->frags);
         free(ctx);
 }
 
@@ -619,17 +629,44 @@ treenode_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
         return pointer;
 }
 
-void push_fan_backref(Jelly *ctx, treenode_t tree) {
-        uint32_t nex = ctx->fans_count++;
-        uint32_t wid = ctx->fans_width;
+/*
+        When we encounter our second reference to an interned interior
+        node, we shatter it.
+
+        We mutate it's value to be a reference into the fragments table,
+        and then we insert
+*/
+void shatter(Jelly *ctx, treenode_t tree) {
+        treenode_value val = ctx->treenodes[tree.ix];
+
+        switch (NODEVAL_TAG(val)) {
+            case 4:
+            case 5:
+            case 6:
+                die("shatter() called with a leaf value.\n");
+            case 7:
+                // Already shattered.
+                return;
+            default:
+                // Tree value
+                break;
+        }
+
+        uint32_t nex = ctx->frags_count++;
+        uint32_t wid = ctx->frags_width;
 
         if (nex >= wid) {
                 wid *= 2;
-                ctx->fans = reallocarray(ctx->fans, wid, sizeof(ctx->fans[0]));
-                ctx->fans_width = wid;
+                ctx->frags = reallocarray(ctx->frags, wid, sizeof(ctx->frags[0]));
+                ctx->frags_width = wid;
         }
 
-        ctx->fans[nex] = tree;
+        treenode_t hed = NODEVAL_HEAD(val);
+        treenode_t tel = NODEVAL_TAIL(val);
+
+        ctx->frags[nex] = (FragVal){ .head = hed, .tail = tel };
+
+        ctx->treenodes[tree.ix] = TAG_FRAG((frag_t) { .ix = nex });
 }
 
 
@@ -813,6 +850,8 @@ treenode_t jelly_cons(Jelly *ctx, treenode_t hed, treenode_t tel) {
                         printf("\t\tTREE MATCH\n\t\t\tt%d = ", cur->pointer.ix);
                         print_tree(ctx, cur->pointer);
                         printf("\n");
+
+                        shatter(ctx, cur->pointer);
 
                         return cur->pointer;
                 }
@@ -1065,10 +1104,6 @@ void jelly_dump(Jelly *ctx, uint8_t *buf) {
         strcpy((char*)buf, "\n\nTODO\n\n");
 }
 
-void jelly_push_final(Jelly *ctx, treenode_t val) {
-        push_fan_backref(ctx, val);
-}
-
 void print_nat_leaf(Jelly *ctx, leaf_t l) {
         if (l.width_bytes > 8) {
                 printf("0x");
@@ -1123,6 +1158,9 @@ size_t print_pin(Jelly *ctx, pin_t pin) {
 }
 
 void print_tree_outline(Jelly*, treenode_t);
+void print_fragment_outline(Jelly*, frag_t);
+void print_fragment(Jelly*, frag_t);
+void print_tree(Jelly*, treenode_t);
 
 void print_tree_outline_list(Jelly *ctx, treenode_t tree) {
         treenode_value val = ctx->treenodes[tree.ix];
@@ -1166,8 +1204,6 @@ void print_tree_outline(Jelly *ctx, treenode_t tree) {
         }
 }
 
-void print_tree(Jelly*, treenode_t);
-
 void print_tree_list(Jelly *ctx, treenode_t tree) {
         treenode_value val = ctx->treenodes[tree.ix];
 
@@ -1175,7 +1211,13 @@ void print_tree_list(Jelly *ctx, treenode_t tree) {
             case 4: print_pin(ctx, NODEVAL_PIN(val)); break;
             case 5: print_bar(ctx, NODEVAL_BAR(val)); break;
             case 6: print_nat(ctx, NODEVAL_NAT(val)); break;
-            case 7: printf("fan"); break;
+            case 7: {
+                FragVal frag = ctx->frags[NODEVAL_FRAG(val).ix];
+                print_tree_list(ctx, frag.head);
+                putchar(' ');
+                print_tree(ctx, frag.tail);
+                break;
+            }
             default: {
                 treenode_t hed = NODEVAL_HEAD(val);
                 treenode_t tel = NODEVAL_TAIL(val);
@@ -1193,7 +1235,7 @@ void print_tree(Jelly *ctx, treenode_t tree) {
             case 4: print_pin(ctx, NODEVAL_PIN(val)); break;
             case 5: print_bar(ctx, NODEVAL_BAR(val)); break;
             case 6: print_nat(ctx, NODEVAL_NAT(val)); break;
-            case 7: printf("fan"); break;
+            case 7: print_fragment(ctx, NODEVAL_FRAG(val)); break;
             default: {
                 treenode_t hed = NODEVAL_HEAD(val);
                 treenode_t tel = NODEVAL_TAIL(val);
@@ -1206,11 +1248,35 @@ void print_tree(Jelly *ctx, treenode_t tree) {
         }
 }
 
+void print_fragment_outline(Jelly *ctx, frag_t ref) {
+        FragVal frag = ctx->frags[ref.ix];
+        putchar('(');
+        print_tree_outline_list(ctx, frag.head);
+        putchar(' ');
+        print_tree_outline(ctx, frag.tail);
+        putchar(')');
+}
+
+void print_fragment(Jelly *ctx, frag_t ref) {
+        FragVal frag = ctx->frags[ref.ix];
+        putchar('(');
+        print_tree_list(ctx, frag.head);
+        putchar(' ');
+        print_tree(ctx, frag.tail);
+        putchar(')');
+}
+
 int treenode_depth(Jelly *ctx, treenode_t node) {
         treenode_value val = ctx->treenodes[node.ix];
         if (val.word >> 63) return 1;
         int hed_depth = treenode_depth(ctx, NODEVAL_HEAD(val));
         int tel_depth = treenode_depth(ctx, NODEVAL_TAIL(val));
+        return (1 + ((hed_depth > tel_depth) ? hed_depth : tel_depth));
+}
+
+int fragment_depth(Jelly *ctx, FragVal frag) {
+        int hed_depth = treenode_depth(ctx, frag.head);
+        int tel_depth = treenode_depth(ctx, frag.tail);
         return (1 + ((hed_depth > tel_depth) ? hed_depth : tel_depth));
 }
 
@@ -1282,8 +1348,6 @@ void jelly_debug(Jelly *ctx) {
 
         jelly_debug_interior_nodes(ctx);
 
-        uint32_t count = ctx->fans_count;
-
         {
                 printf("\n\tpins: (width=%u, count=%u)\n\n",
                        ctx->pins_width,
@@ -1352,13 +1416,19 @@ void jelly_debug(Jelly *ctx) {
                 }
         }
 
-        if (count == 0) die("jelly_debug: no value to print\n");
-        if (count > 1) die("TODO: Print backreferences");
+        printf("\nJelly Fragments:\n\n");
 
-        treenode_t last = ctx->fans[count - 1];
-        int depth = treenode_depth(ctx, last);
-        printf("\n\tfinal value (treenode=%d depth=%d):\n\n\t\t", last.ix, depth);
-        print_tree(ctx, last);
+        uint32_t count = ctx->frags_count;
+        for (int i=0; i<count; i++) {
+                FragVal cur = ctx->frags[i];
+                int depth = fragment_depth(ctx, cur);
+                printf("\tFragment[%d]: (depth=%d)\n\n\t\t(t%d, t%d) = ", i, depth, cur.head.ix, cur.tail.ix);
+                print_fragment_outline(ctx, (frag_t){i});
+
+                printf("\n\n\t\t    ");
+                print_fragment(ctx, (frag_t){i});
+                printf("\n\n");
+        }
 }
 
 
@@ -1375,12 +1445,17 @@ int main () {
         tmp = jelly_pin(ctx, &dumb_hash_2);
         top = jelly_cons(ctx, tmp, top);
 
-        jelly_push_final(ctx, top);
-
         int wid = jelly_buffer_size(ctx);
+
         uint8_t *buf = calloc(wid, sizeof(uint8_t));
 
         jelly_debug(ctx);
+
+        printf("\n\nFull Outline:\n\n\t");
+        print_tree_outline(ctx, top);
+
+        printf("\n\nFull Tree:\n\n\t");
+        print_tree(ctx, top);
 
         jelly_dump(ctx, buf);
         fwrite(buf, 1, wid, stdout);
