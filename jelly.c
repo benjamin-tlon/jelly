@@ -92,12 +92,11 @@ typedef struct { uint32_t ix; } desk_t;       //  Index into Jelly.desks
 typedef struct {
     uint32_t num_leaves;  // total number of interior (non-leaf) nodes in a tree.
     uint32_t num_bytes;   // total number of bytes in all leaves.
-    uint32_t row_hash;    // = (uint32_t) hash_combine(leaves_hash, shape_hash);
+    uint32_t row_hash;    // = (uint32_t) leaves_hash
     treenode_t pointer;   // If this is in a `desks` freelist,
                           // then this is instead an index into the
                           // desks array.
     uint64_t leaves_hash; // Summary hash of all leaf-data.
-    uint64_t shape_hash;  // Summary hash of the tree shape.
 } FanEntry;
 
 typedef struct treenode_value {
@@ -475,7 +474,6 @@ desk_t create_node(Jelly *ctx, uint64_t hash, uint32_t num_bytes, treenode_value
         ws->num_leaves  = 1;
         ws->num_bytes   = num_bytes;
         ws->leaves_hash = hash;
-        ws->shape_hash  = 0;
         ws->row_hash    = 0; // Never used for leaf nodes.
         ws->pointer     = pointer;
 
@@ -810,12 +808,11 @@ desk_t jelly_pin(Jelly *ctx, hash256_t *pin) {
 typedef struct {
     uint32_t num_leaves;  // total number of interior (non-leaf) nodes in a tree.
     uint32_t num_bytes;   // total number of bytes in all leaves.
-    uint32_t row_hash;    // = (uint32_t) hash_combine(leaves_hash, shape_hash);
+    uint32_t row_hash;    // = (uint32_t) leaves_hash
     treenode_t pointer;   // If this is in a `desks` freelist,
                           // then this is instead an index into the
                           // desks array.
     uint64_t leaves_hash; // Summary hash of all leaf-data.
-    uint64_t shape_hash;  // Summary hash of the tree shape.
 } FanEntry;
 */
 
@@ -841,7 +838,6 @@ FanEntry *find_matching_treenode(Jelly *ctx, FanEntry ent) {
                 FanEntry match = *cur;
 
                 if ( ent.leaves_hash == match.leaves_hash
-                  && ent.shape_hash == match.shape_hash
                   && ent.num_leaves == match.num_leaves
                   && ent.num_bytes == match.num_bytes
                   && tree_equals(ctx, ent.pointer, match.pointer)
@@ -864,35 +860,6 @@ desk_t jelly_cons(Jelly *ctx, desk_t hed, desk_t tel) {
         uint32_t num_leaves  = h.num_leaves + t.num_leaves;
         uint32_t num_bytes   = h.num_bytes  + t.num_bytes;
         uint64_t leaves_hash = hash_combine(h.leaves_hash, t.leaves_hash);
-        uint64_t shape_width = (num_leaves * 2) - 1;
-
-        /*
-           The shape-hash is the outline of the tree.  Cells are 1-bits and
-           leaves are 0-bits.
-
-               The shape of 9:             0b0
-               The shape of (9 8):         0b100
-               The shape of ((9 8) 7):     0b11000
-               The shape of ((9 8) (7 6)): 0b1100100
-
-           These shapes quickly exceed our 64-bit word sizes (as soon as we
-           are working with sub-trees that contain 33 leaves or more).
-           At that point, we shuffle the bits using Murmur3's fmix64 and
-           switch to just using a hash-combination routine.
-        */
-        uint32_t head_bits = (h.num_leaves * 2) - 1;
-        uint32_t tail_bits = (t.num_leaves * 2) - 1;
-        uint64_t shape_hash;
-        if (shape_width > 64) {
-                if (head_bits <= 64) h.shape_hash = fmix64(h.shape_hash);
-                if (tail_bits <= 64) t.shape_hash = fmix64(t.shape_hash);
-                shape_hash = hash_combine(h.shape_hash, t.shape_hash);
-        } else {
-                shape_hash = (1ULL << (shape_width-1))
-                           | (h.shape_hash << tail_bits)
-                           | t.shape_hash
-                           ;
-        }
 
         treenode_t pointer = alloc_treenode(ctx, TAG_PAIR(h.pointer, t.pointer));
 
@@ -904,8 +871,7 @@ desk_t jelly_cons(Jelly *ctx, desk_t hed, desk_t tel) {
         target->num_leaves  = num_leaves;
         target->num_bytes   = num_bytes;
         target->leaves_hash = leaves_hash;
-        target->shape_hash  = shape_hash;
-        target->row_hash    = (uint32_t) hash_combine(leaves_hash, shape_hash);
+        target->row_hash    = (uint32_t) leaves_hash;
         target->pointer     = pointer;
 
         free_desk(ctx, tel);
@@ -1411,7 +1377,7 @@ void jelly_debug_interior_nodes(Jelly *ctx) {
                 printf("\n\n");
 
                 printf("\t\t  num_{leaves,bytes}: %u %u\n", ent.num_leaves, ent.num_bytes);
-                printf("\t\t  {row,leaves,shape}_hash: 0x%08x 0x%016lx 0x%016lx\n", ent.row_hash, ent.leaves_hash, ent.shape_hash);
+                printf("\t\t  {row,leaves}_hash: 0x%08x 0x%016lx\n", ent.row_hash, ent.leaves_hash);
         }
 }
 
