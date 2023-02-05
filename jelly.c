@@ -218,31 +218,31 @@ FORCE_INLINE treenode_value TAG_PAIR(treenode_t hed, treenode_t tel) {
         return (treenode_value){ .word = result };
 }
 
-FORCE_INLINE uint64_t TREENODE_VAL_TAG(treenode_value v) {
+FORCE_INLINE uint64_t NODEVAL_TAG(treenode_value v) {
         return (v.word >> 61);
 }
 
-FORCE_INLINE treenode_t TREENODE_VAL_HEAD(treenode_value v) {
+FORCE_INLINE treenode_t NODEVAL_HEAD(treenode_value v) {
         return (treenode_t){ .ix = (uint32_t) (v.word >> 32) };
 }
 
 // We rely on the cast to drop the high-bits.
-FORCE_INLINE treenode_t TREENODE_VAL_TAIL(treenode_value v) {
+FORCE_INLINE treenode_t NODEVAL_TAIL(treenode_value v) {
         return (treenode_t){ .ix = (uint32_t) v.word };
 }
 
 // We rely on the cast to drop the high-bits.
-FORCE_INLINE nat_t TREENODE_VAL_NAT(treenode_value v) {
+FORCE_INLINE nat_t NODEVAL_NAT(treenode_value v) {
         return (nat_t){ .ix = (uint32_t) v.word };
 }
 
 // We rely on the cast to drop the high-bits.
-FORCE_INLINE bar_t TREENODE_VAL_BAR(treenode_value v) {
+FORCE_INLINE bar_t NODEVAL_BAR(treenode_value v) {
         return (bar_t){ .ix = (uint32_t) v.word };
 }
 
 // We rely on the cast to drop the high-bits.
-FORCE_INLINE pin_t TREENODE_VAL_PIN(treenode_value v) {
+FORCE_INLINE pin_t NODEVAL_PIN(treenode_value v) {
         return (pin_t){ .ix = (uint32_t) v.word };
 }
 
@@ -806,6 +806,55 @@ desk_t jelly_pin(Jelly *ctx, hash256_t *pin) {
 
 // Inserting Nats //////////////////////////////////////////////////////////////
 
+/*
+typedef struct {
+    uint32_t num_leaves;  // total number of interior (non-leaf) nodes in a tree.
+    uint32_t num_bytes;   // total number of bytes in all leaves.
+    uint32_t row_hash;    // = (uint32_t) hash_combine(leaves_hash, shape_hash);
+    treenode_t pointer;   // If this is in a `desks` freelist,
+                          // then this is instead an index into the
+                          // desks array.
+    uint64_t leaves_hash; // Summary hash of all leaf-data.
+    uint64_t shape_hash;  // Summary hash of the tree shape.
+} FanEntry;
+*/
+
+bool tree_equals(Jelly*, treenode_t, treenode_t);
+
+/*
+        Either returns a pointer to a matching treenode, or returns a
+        pointer into an empty slot that may be written to.
+*/
+FanEntry *find_matching_treenode(Jelly *ctx, FanEntry ent) {
+        uint32_t num = ctx->nodes_table_count;
+
+        int i = 0;
+
+        for (i=0; i<num; i++) {
+                FanEntry *cur = (ctx->nodes_table + i);
+
+                uint32_t row_hash = cur->row_hash;
+
+                if (row_hash == 0)            return cur;
+                if (row_hash != ent.row_hash) continue;
+
+                FanEntry match = *cur;
+
+                if ( ent.leaves_hash == match.leaves_hash
+                  && ent.shape_hash == match.shape_hash
+                  && ent.num_leaves == match.num_leaves
+                  && ent.num_bytes == match.num_bytes
+                  && tree_equals(ctx, ent.pointer, match.pointer)
+                   ) {
+                       return cur;
+               }
+        }
+
+        return (ctx->nodes_table + i);
+}
+
+void print_tree(Jelly*, treenode_t);
+
 desk_t jelly_cons(Jelly *ctx, desk_t hed, desk_t tel) {
         printf("\tjelly_cons(%i, %i)\n", hed.ix, tel.ix);
 
@@ -861,12 +910,29 @@ desk_t jelly_cons(Jelly *ctx, desk_t hed, desk_t tel) {
 
         free_desk(ctx, tel);
 
+        //////////////////////////////////////////////////////////////////////////
+
+        uint32_t num = ctx->nodes_table_count;
+        uint32_t wid = ctx->nodes_table_width;
+        if (num*2 >= wid) {
+                die("resize nodes table\n");
+        }
+
+        FanEntry *match = find_matching_treenode(ctx, *target);
+
         // TODO Resize if too big.
-        // TODO Search for duplicates (if we find a duplicate, we must
-        //      add to backrefs table and mutate the treenode to be a
-        //      reference to that fan value).
+        // DONE Find duplicates.
+        // TODO Duplicates become backrefs.
         // TODO Turn this into a hash table.
-        ctx->nodes_table[ctx->nodes_table_count++] = *target;
+
+        if (match->row_hash == 0) {
+                *match = *target;
+                ctx->nodes_table_count++;
+        } else {
+                printf("TREE MATCH @[%04d] = ", match->pointer.ix);
+                print_tree(ctx, match->pointer);
+                printf("\n");
+        }
 
         return hed;
 }
@@ -1161,6 +1227,32 @@ size_t print_pin(Jelly *ctx, pin_t pin) {
         return output_size;
 }
 
+bool tree_equals(Jelly *ctx, treenode_t x, treenode_t y) {
+    loop:
+        treenode_value xval = ctx->treenodes[x.ix];
+        treenode_value yval = ctx->treenodes[y.ix];
+
+        if (xval.word == yval.word) {
+                return true;
+        }
+
+        uint64_t x_is_leaf = (xval.word >> 63);
+        uint64_t y_is_leaf = (yval.word >> 63);
+
+        if (x_is_leaf || y_is_leaf) {
+                return false;
+        }
+
+        if (!tree_equals(ctx, NODEVAL_HEAD(xval), NODEVAL_HEAD(yval))) {
+                return false;
+        }
+
+        // tail recursion
+        x = NODEVAL_TAIL(xval);
+        y = NODEVAL_TAIL(yval);
+        goto loop;
+}
+
 void print_tree_outline(Jelly*, treenode_t);
 
 void print_tree_outline_list(Jelly *ctx, treenode_t tree) {
@@ -1168,14 +1260,14 @@ void print_tree_outline_list(Jelly *ctx, treenode_t tree) {
 
         uint32_t offset = (uint32_t) val.word;
 
-        switch (TREENODE_VAL_TAG(val)) {
+        switch (NODEVAL_TAG(val)) {
             case 4: printf("p%u", offset); break;
             case 5: printf("b%u", offset); break;
             case 6: printf("n%u", offset); break;
             case 7: printf("f%u", offset); break;
             default: {
-                treenode_t hed = TREENODE_VAL_HEAD(val);
-                treenode_t tel = TREENODE_VAL_TAIL(val);
+                treenode_t hed = NODEVAL_HEAD(val);
+                treenode_t tel = NODEVAL_TAIL(val);
                 print_tree_outline_list(ctx, hed);
                 putchar(' ');
                 print_tree_outline(ctx, tel);
@@ -1188,14 +1280,14 @@ void print_tree_outline(Jelly *ctx, treenode_t tree) {
 
         uint32_t offset = (uint32_t) val.word;
 
-        switch (TREENODE_VAL_TAG(val)) {
+        switch (NODEVAL_TAG(val)) {
             case 4: printf("p%u", offset); break;
             case 5: printf("b%u", offset); break;
             case 6: printf("n%u", offset); break;
             case 7: printf("f%u", offset); break;
             default: {
-                treenode_t hed = TREENODE_VAL_HEAD(val);
-                treenode_t tel = TREENODE_VAL_TAIL(val);
+                treenode_t hed = NODEVAL_HEAD(val);
+                treenode_t tel = NODEVAL_TAIL(val);
                 putchar('(');
                 print_tree_outline_list(ctx, hed);
                 putchar(' ');
@@ -1211,14 +1303,14 @@ void print_tree(Jelly*, treenode_t);
 void print_tree_list(Jelly *ctx, treenode_t tree) {
         treenode_value val = ctx->treenodes[tree.ix];
 
-        switch (TREENODE_VAL_TAG(val)) {
-            case 4: print_pin(ctx, TREENODE_VAL_PIN(val)); break;
-            case 5: print_bar(ctx, TREENODE_VAL_BAR(val)); break;
-            case 6: print_nat(ctx, TREENODE_VAL_NAT(val)); break;
+        switch (NODEVAL_TAG(val)) {
+            case 4: print_pin(ctx, NODEVAL_PIN(val)); break;
+            case 5: print_bar(ctx, NODEVAL_BAR(val)); break;
+            case 6: print_nat(ctx, NODEVAL_NAT(val)); break;
             case 7: printf("fan"); break;
             default: {
-                treenode_t hed = TREENODE_VAL_HEAD(val);
-                treenode_t tel = TREENODE_VAL_TAIL(val);
+                treenode_t hed = NODEVAL_HEAD(val);
+                treenode_t tel = NODEVAL_TAIL(val);
                 print_tree_list(ctx, hed);
                 putchar(' ');
                 print_tree(ctx, tel);
@@ -1229,14 +1321,14 @@ void print_tree_list(Jelly *ctx, treenode_t tree) {
 void print_tree(Jelly *ctx, treenode_t tree) {
         treenode_value val = ctx->treenodes[tree.ix];
 
-        switch (TREENODE_VAL_TAG(val)) {
-            case 4: print_pin(ctx, TREENODE_VAL_PIN(val)); break;
-            case 5: print_bar(ctx, TREENODE_VAL_BAR(val)); break;
-            case 6: print_nat(ctx, TREENODE_VAL_NAT(val)); break;
+        switch (NODEVAL_TAG(val)) {
+            case 4: print_pin(ctx, NODEVAL_PIN(val)); break;
+            case 5: print_bar(ctx, NODEVAL_BAR(val)); break;
+            case 6: print_nat(ctx, NODEVAL_NAT(val)); break;
             case 7: printf("fan"); break;
             default: {
-                treenode_t hed = TREENODE_VAL_HEAD(val);
-                treenode_t tel = TREENODE_VAL_TAIL(val);
+                treenode_t hed = NODEVAL_HEAD(val);
+                treenode_t tel = NODEVAL_TAIL(val);
                 putchar('(');
                 print_tree_list(ctx, hed);
                 putchar(' ');
@@ -1249,8 +1341,8 @@ void print_tree(Jelly *ctx, treenode_t tree) {
 int treenode_depth(Jelly *ctx, treenode_t node) {
         treenode_value val = ctx->treenodes[node.ix];
         if (val.word >> 63) return 1;
-        int hed_depth = treenode_depth(ctx, TREENODE_VAL_HEAD(val));
-        int tel_depth = treenode_depth(ctx, TREENODE_VAL_TAIL(val));
+        int hed_depth = treenode_depth(ctx, NODEVAL_HEAD(val));
+        int tel_depth = treenode_depth(ctx, NODEVAL_TAIL(val));
         return (1 + ((hed_depth > tel_depth) ? hed_depth : tel_depth));
 }
 
@@ -1314,7 +1406,7 @@ void jelly_debug_interior_nodes(Jelly *ctx) {
                         printf("[long]\n\n");
                 }
 
-                printf("\t\t  ", i, ent.pointer.ix);
+                printf("\t\t  ");
                 print_tree_outline(ctx, ent.pointer);
                 printf("\n\n");
 
@@ -1404,8 +1496,8 @@ void jelly_debug(Jelly *ctx) {
                                 printf("\t\t[%04d]: f%u\n", i, (uint32_t) val.word);
                                 continue;
                             default: {
-                                treenode_t hed = TREENODE_VAL_HEAD(val);
-                                treenode_t tel = TREENODE_VAL_TAIL(val);
+                                treenode_t hed = NODEVAL_HEAD(val);
+                                treenode_t tel = NODEVAL_TAIL(val);
                                 printf("\t\t[%04d]: (%u, %u)\n", i, hed.ix, tel.ix);
                                 continue;
                             }
