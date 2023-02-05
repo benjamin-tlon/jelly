@@ -89,14 +89,15 @@ typedef struct { uint32_t ix; } fan_t;        //  Index into Jelly.fans
 typedef struct { uint32_t ix; } treenode_t;   //  Index into Jelly.treenodes
 typedef struct { uint32_t ix; } workspace_t;  //  Index into Jelly.workspaces
 
-typedef struct fan_entry {
+typedef struct {
     uint32_t num_leaves;  // total number of interior (non-leaf) nodes in a tree.
     uint32_t num_bytes;   // total number of bytes in all leaves.
-    uint64_t leaves_hash; // Summary hash of all leaf-data.
-    uint64_t shape_hash;  // Summary hash of the tree shape.
+    uint32_t row_hash;    // = (uint32_t) hash_combine(leaves_hash, shape_hash);
     treenode_t pointer;   // If this is in a `workspaces` freelist,
                           // then this is instead an index into the
                           // workspaces array.
+    uint64_t leaves_hash; // Summary hash of all leaf-data.
+    uint64_t shape_hash;  // Summary hash of the tree shape.
 } FanEntry;
 
 typedef struct treenode_value {
@@ -170,6 +171,11 @@ typedef struct jelly_ctx {
     uint32_t leaves_table_count;
     uint64_t leaves_table_width_mask;
 
+    // Interior-Node Deduplication table.
+    FanEntry *nodes_table;
+    uint32_t nodes_table_width;
+    uint32_t nodes_table_count;
+    uint64_t nodes_table_width_mask;
 
     // Array of duplicate tree-nodes (and the top-level node).  Each one
     // is an index into `treenodes`.
@@ -269,10 +275,16 @@ Jelly *new_jelly_ctx () {
         res->nats_count = 0;
 
         // Deduplication table for leaves
-        res->leaves_table            = calloc(4, sizeof(res->leaves_table[0]));
-        res->leaves_table_width      = 4;
-        res->leaves_table_width_mask = ((1 << 2) - 1);  //  ((2**2) - 1) -> 0b11
+        res->leaves_table            = calloc((1<<2), sizeof(res->leaves_table[0]));
+        res->leaves_table_width      = (1<<2);
+        res->leaves_table_width_mask = ((1<<2) - 1);
         res->leaves_table_count      = 0;
+
+        // Deduplication table for interior nodes
+        res->nodes_table            = calloc((1<<10), sizeof(res->nodes_table[0]));
+        res->nodes_table_width      = (1<<10);
+        res->nodes_table_width_mask = ((1<<10) - 1);
+        res->nodes_table_count      = 0;
 
         // Array of duplicate tree-nodes (and the top-level node).  Each one
         // is an index into `treenodes`.
@@ -290,6 +302,7 @@ void free_jelly_ctx (Jelly *ctx) {
         free(ctx->bars);
         free(ctx->nats);
         free(ctx->leaves_table);
+        free(ctx->nodes_table);
         free(ctx->fans);
         free(ctx);
 }
@@ -391,6 +404,7 @@ typedef struct {
 } IndirectInsertRequest;
 
 void jelly_debug_leaves(Jelly*);
+void jelly_debug_interior_nodes(Jelly*);
 
 void rehash_leaves_if_full(Jelly *ctx) {
         uint32_t oldwid = ctx->leaves_table_width;
@@ -455,12 +469,13 @@ workspace_t create_node(Jelly *ctx, uint64_t hash, uint32_t num_bytes, treenode_
         treenode_t pointer = alloc_treenode(ctx, val);
 
         workspace_t res = alloc_workspace(ctx);
-        FanEntry *ws = &(ctx->workspaces[res.ix]);
+        FanEntry *ws    = &(ctx->workspaces[res.ix]);
 
         ws->num_leaves  = 1;
         ws->num_bytes   = num_bytes;
         ws->leaves_hash = hash;
         ws->shape_hash  = 0;
+        ws->row_hash    = 0; // Never used for leaf nodes.
         ws->pointer     = pointer;
 
         return res;
@@ -835,14 +850,22 @@ workspace_t jelly_cons(Jelly *ctx, workspace_t hed, workspace_t tel) {
         // we can directly re-use the memory from the head.  The tail is
         // released.
 
-        FanEntry *target = ctx->workspaces + hed.ix;
+        FanEntry *target    = ctx->workspaces + hed.ix;
         target->num_leaves  = num_leaves;
         target->num_bytes   = num_bytes;
         target->leaves_hash = leaves_hash;
         target->shape_hash  = shape_hash;
+        target->row_hash    = (uint32_t) hash_combine(leaves_hash, shape_hash);
         target->pointer     = pointer;
 
         free_workspace(ctx, tel);
+
+        // TODO Resize if too big.
+        // TODO Search for duplicates (if we find a duplicate, we must
+        //      add to backrefs table and mutate the treenode to be a
+        //      reference to that fan value).
+        // TODO Turn this into a hash table.
+        ctx->nodes_table[ctx->nodes_table_count++] = *target;
 
         return hed;
 }
@@ -1218,6 +1241,38 @@ void jelly_debug_leaves(Jelly *ctx) {
         }
 }
 
+
+void jelly_debug_interior_nodes(Jelly *ctx) {
+        printf("\n\tinterior_nodes_table: (width=%u, count=%u)\n\n",
+               ctx->nodes_table_width,
+               ctx->nodes_table_count);
+
+        int wid = ctx->nodes_table_width;
+
+        for (int i=0; i<wid; i++) {
+                FanEntry ent = ctx->nodes_table[i];
+
+                // Empty slot
+                if (ent.num_leaves == 0) continue;
+
+                if (ent.num_leaves < 10) {
+                        printf("\n\t\t[%04d] = ", i);
+                        print_tree(ctx, ent.pointer);
+                        printf("\n\n");
+                } else {
+                        printf("\n\t\t[%04d] = [long]\n\n", i);
+                }
+
+                printf("\t\t\tpointer: %u\n", ent.pointer.ix);
+                printf("\t\t\tnum_leaves: %u\n", ent.num_leaves);
+                printf("\t\t\tnum_bytes: %u\n", ent.num_bytes);
+                printf("\t\t\trow_hash: 0x%08x\n", ent.row_hash);
+                printf("\t\t\tleaves_hash: 0x%016lx\n", ent.leaves_hash);
+                printf("\t\t\tshape_hash: 0x%016lx\n", ent.shape_hash);
+        }
+}
+
+
 void jelly_debug(Jelly *ctx) {
         printf("\njelly_debug():\n");
 
@@ -1235,6 +1290,7 @@ void jelly_debug(Jelly *ctx) {
         }
 
         jelly_debug_leaves(ctx);
+        jelly_debug_interior_nodes(ctx);
 
         uint32_t count = ctx->fans_count;
 
