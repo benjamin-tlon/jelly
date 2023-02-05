@@ -139,6 +139,7 @@ typedef struct leaf {
 typedef struct jelly_ctx {
     // One entry per tree-node
     treenode_value *treenodes;
+    uint32_t *refcounts;
     int32_t treenodes_width;
     int32_t treenodes_count;
 
@@ -252,6 +253,7 @@ Jelly *new_jelly_ctx () {
 
         // One entry per unique node (both leaves and interior nodes)
         res->treenodes       = calloc(32, sizeof(res->treenodes[0]));
+        res->refcounts       = calloc(32, sizeof(res->refcounts[0]));
         res->treenodes_width = 32;
         res->treenodes_count = 0;
 
@@ -294,6 +296,7 @@ Jelly *new_jelly_ctx () {
 
 void free_jelly_ctx (Jelly *ctx) {
         free(ctx->treenodes);
+        free(ctx->refcounts);
         free(ctx->pins);
         free(ctx->bars);
         free(ctx->nats);
@@ -311,10 +314,12 @@ FORCE_INLINE treenode_t alloc_treenode(Jelly *c, treenode_value v) {
         if (res >= wid) {
                 wid *= 2;
                 c->treenodes = reallocarray(c->treenodes, wid, sizeof(c->treenodes[0]));
+                c->refcounts = reallocarray(c->refcounts, wid, sizeof(c->refcounts[0]));
                 c->treenodes_width = wid;
         }
 
         c->treenodes[res] = v;
+        c->refcounts[res] = 0;
 
         return (treenode_t){ .ix = res };
 }
@@ -525,6 +530,7 @@ treenode_t insert_packed_leaf(Jelly *ctx, PackedInsertRequest req) {
                 if (!match) continue;
 
                 printf("\t\tPACKED_LEAF_MATCH:\n\t\t\t");
+                ctx->refcounts[ent->pointer.ix]++;
                 print_tree_outline(ctx, ent->pointer);
                 printf(" = ");
                 print_tree(ctx, ent->pointer);
@@ -601,6 +607,7 @@ treenode_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
                 if (o != 0) continue;
 
                 printf("\t\tINDIRECT_LEAF_MATCH:\n\t\t\t");
+                ctx->refcounts[ent->pointer.ix]++;
                 print_tree_outline(ctx, ent->pointer);
                 printf(" = ");
                 print_tree(ctx, ent->pointer);
@@ -636,21 +643,21 @@ treenode_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
         We mutate it's value to be a reference into the fragments table,
         and then we insert
 */
-void shatter(Jelly *ctx, treenode_t tree) {
+
+void fragment(Jelly *ctx, treenode_t tree) {
         treenode_value val = ctx->treenodes[tree.ix];
 
+        // Ignore leaves and already-fragmented values.
         switch (NODEVAL_TAG(val)) {
             case 4:
             case 5:
             case 6:
-                die("shatter() called with a leaf value.\n");
             case 7:
-                // Already shattered.
                 return;
-            default:
-                // Tree value
-                break;
         }
+
+        treenode_t hed = NODEVAL_HEAD(val);
+        treenode_t tel = NODEVAL_TAIL(val);
 
         uint32_t nex = ctx->frags_count++;
         uint32_t wid = ctx->frags_width;
@@ -661,12 +668,35 @@ void shatter(Jelly *ctx, treenode_t tree) {
                 ctx->frags_width = wid;
         }
 
-        treenode_t hed = NODEVAL_HEAD(val);
-        treenode_t tel = NODEVAL_TAIL(val);
-
         ctx->frags[nex] = (FragVal){ .head = hed, .tail = tel };
 
         ctx->treenodes[tree.ix] = TAG_FRAG((frag_t) { .ix = nex });
+}
+
+uint32_t shatter(Jelly *ctx, treenode_t tree) {
+        treenode_value val = ctx->treenodes[tree.ix];
+
+        uint32_t refs = ctx->refcounts[tree.ix];
+
+        // Ignore leaves and already-fragmented values.
+        switch (NODEVAL_TAG(val)) {
+            case 4:
+            case 5:
+            case 6:
+            case 7:
+                return refs;
+        }
+
+        treenode_t head = NODEVAL_HEAD(val);
+        treenode_t tail = NODEVAL_TAIL(val);
+
+        uint32_t head_refs = shatter(ctx, head);
+        uint32_t tail_refs = shatter(ctx, tail);
+
+        if (head_refs > refs) fragment(ctx, head);
+        if (tail_refs > refs) fragment(ctx, tail);
+
+        return refs;
 }
 
 
@@ -851,7 +881,7 @@ treenode_t jelly_cons(Jelly *ctx, treenode_t hed, treenode_t tel) {
                         print_tree(ctx, cur->pointer);
                         printf("\n");
 
-                        shatter(ctx, cur->pointer);
+                        ctx->refcounts[cur->pointer.ix]++;
 
                         return cur->pointer;
                 }
@@ -1435,15 +1465,17 @@ void jelly_debug(Jelly *ctx) {
 int main () {
         Jelly *ctx = new_jelly_ctx();
 
-        hash256_t dumb_hash_1 = { fmix64(111111), fmix64(65535), fmix64(9),  65536 };
-        hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
+        //hash256_t dumb_hash_1 = { fmix64(111111), fmix64(65535), fmix64(9),  65536 };
+        //hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
         treenode_t top = read_some(ctx);
-        treenode_t tmp = jelly_pin(ctx, &dumb_hash_1);
-        top = jelly_cons(ctx, tmp, top);
-        tmp = jelly_pin(ctx, &dumb_hash_1);
-        top = jelly_cons(ctx, tmp, top);
-        tmp = jelly_pin(ctx, &dumb_hash_2);
-        top = jelly_cons(ctx, tmp, top);
+        // treenode_t tmp = jelly_pin(ctx, &dumb_hash_1);
+        // top = jelly_cons(ctx, tmp, top);
+        // tmp = jelly_pin(ctx, &dumb_hash_1);
+        // top = jelly_cons(ctx, tmp, top);
+        // tmp = jelly_pin(ctx, &dumb_hash_2);
+        // top = jelly_cons(ctx, tmp, top);
+
+        shatter(ctx, top);
 
         int wid = jelly_buffer_size(ctx);
 
