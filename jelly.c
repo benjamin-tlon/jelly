@@ -1161,6 +1161,51 @@ size_t print_pin(Jelly *ctx, pin_t pin) {
         return output_size;
 }
 
+void print_tree_outline(Jelly*, treenode_t);
+
+void print_tree_outline_list(Jelly *ctx, treenode_t tree) {
+        treenode_value val = ctx->treenodes[tree.ix];
+
+        uint32_t offset = (uint32_t) val.word;
+
+        switch (TREENODE_VAL_TAG(val)) {
+            case 4: printf("p%u", offset); break;
+            case 5: printf("b%u", offset); break;
+            case 6: printf("n%u", offset); break;
+            case 7: printf("f%u", offset); break;
+            default: {
+                treenode_t hed = TREENODE_VAL_HEAD(val);
+                treenode_t tel = TREENODE_VAL_TAIL(val);
+                print_tree_outline_list(ctx, hed);
+                putchar(' ');
+                print_tree_outline(ctx, tel);
+            }
+        }
+}
+
+void print_tree_outline(Jelly *ctx, treenode_t tree) {
+        treenode_value val = ctx->treenodes[tree.ix];
+
+        uint32_t offset = (uint32_t) val.word;
+
+        switch (TREENODE_VAL_TAG(val)) {
+            case 4: printf("p%u", offset); break;
+            case 5: printf("b%u", offset); break;
+            case 6: printf("n%u", offset); break;
+            case 7: printf("f%u", offset); break;
+            default: {
+                treenode_t hed = TREENODE_VAL_HEAD(val);
+                treenode_t tel = TREENODE_VAL_TAIL(val);
+                putchar('(');
+                print_tree_outline_list(ctx, hed);
+                putchar(' ');
+                print_tree_outline(ctx, tel);
+                putchar(')');
+            }
+        }
+}
+
+
 void print_tree(Jelly*, treenode_t);
 
 void print_tree_list(Jelly *ctx, treenode_t tree) {
@@ -1268,6 +1313,10 @@ void jelly_debug_interior_nodes(Jelly *ctx) {
                 } else {
                         printf("[long]\n\n");
                 }
+
+                printf("\t\t  ", i, ent.pointer.ix);
+                print_tree_outline(ctx, ent.pointer);
+                printf("\n\n");
 
                 printf("\t\t  num_{leaves,bytes}: %u %u\n", ent.num_leaves, ent.num_bytes);
                 printf("\t\t  {row,leaves,shape}_hash: 0x%08x 0x%016lx 0x%016lx\n", ent.row_hash, ent.leaves_hash, ent.shape_hash);
