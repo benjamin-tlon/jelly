@@ -14,3 +14,7 @@
 ((0 0 3 0) 0xdeadbeef 0xdeadbeef77deadbeef)
 
 ((0 0 3 0) 0x112233445566778899 0x112233445566778899)
+
+0xdead
+
+0xbeef

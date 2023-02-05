@@ -11,8 +11,9 @@
         bit-serialization, don't use recursion.
 
 -   DONE Internior nodes table.
--   TODO treenode_equals
--   TODO Interior node deduplication (and backrefs)
+-   DONE treenode_equals
+-   DONE Interior node deduplication
+-   TODO Fan backrefs.
 -   TODO Printer shows backreferenes table.
 
 -   TODO Calculate resulting buffer size.

@@ -87,21 +87,18 @@ typedef struct { uint32_t ix; } bar_t;        //  Index into Jelly.bars
 typedef struct { uint32_t ix; } nat_t;        //  Index into Jelly.nats
 typedef struct { uint32_t ix; } fan_t;        //  Index into Jelly.fans
 typedef struct { uint32_t ix; } treenode_t;   //  Index into Jelly.treenodes
-typedef struct { uint32_t ix; } desk_t;       //  Index into Jelly.desks
-
-typedef struct {
-    uint32_t num_leaves;  // total number of interior (non-leaf) nodes in a tree.
-    uint32_t num_bytes;   // total number of bytes in all leaves.
-    uint32_t row_hash;    // = (uint32_t) leaves_hash
-    treenode_t pointer;   // If this is in a `desks` freelist,
-                          // then this is instead an index into the
-                          // desks array.
-    uint64_t leaves_hash; // Summary hash of all leaf-data.
-} FanEntry;
 
 typedef struct treenode_value {
         uint64_t word;
 } treenode_value;
+
+typedef struct {
+    treenode_value val;   // (Word32, Word32)
+    uint32_t hash;        // Bit mixed + truncated version of `val.word`
+    treenode_t pointer;   // If this is in a `desks` freelist,
+                          // then this is instead an index into the
+                          // desks array.
+} FanEntry;
 
 typedef struct word_entry {
         uint64_t value;
@@ -118,9 +115,6 @@ typedef struct tagged_width {
 } tagged_width_t;
 
 /*
-        `offset` is an index into Jelly.pins, Jelly.bars, or Jelly.nats,
-        depending on the tag in `tagged_width`
-
         If the byte-array width is less than nine, the data is directly
         inlined into `bytes`.
 */
@@ -128,7 +122,7 @@ typedef struct leaves_table_entry {
         uint64_t hash;
         tagged_width_t width;
         uint8_t *bytes;
-        int32_t offset;
+        treenode_t pointer;
 } leaves_table_entry_t;
 
 /* A nat or a bar */
@@ -138,12 +132,6 @@ typedef struct leaf {
 } leaf_t;
 
 typedef struct jelly_ctx {
-    // Ephemeral entries used during construction (recursive stack frames).
-    FanEntry *desks;
-    int32_t desks_width;
-    int32_t desks_count;
-    desk_t desks_freelist;
-
     // One entry per tree-node
     treenode_value *treenodes;
     int32_t treenodes_width;
@@ -182,6 +170,9 @@ typedef struct jelly_ctx {
     uint32_t fans_width;
     uint32_t fans_count;
 } Jelly;
+
+void print_tree(Jelly*, treenode_t);
+
 
 FORCE_INLINE treenode_value TAG_FAN(fan_t fan) {
         uint64_t index = (uint64_t) fan.ix;
@@ -249,11 +240,8 @@ FORCE_INLINE pin_t NODEVAL_PIN(treenode_value v) {
 
 Jelly *new_jelly_ctx () {
         Jelly *res = malloc(sizeof(Jelly));
-        res->desks          = calloc(32, sizeof(res->desks[0]));
-        res->desks_width    = 32;
-        res->desks_count    = 0;
-        res->desks_freelist = (desk_t){-1};
 
+        // One entry per unique node (both leaves and interior nodes)
         res->treenodes       = calloc(32, sizeof(res->treenodes[0]));
         res->treenodes_width = 32;
         res->treenodes_count = 0;
@@ -280,10 +268,13 @@ Jelly *new_jelly_ctx () {
         res->leaves_table_count = 0;
 
         // Deduplication table for interior nodes
-        res->nodes_table       = calloc((1<<10), sizeof(res->nodes_table[0]));
+        size_t nodes_table_byte_width = (1<<10) * sizeof(res->nodes_table[0]);
+        res->nodes_table       = malloc(nodes_table_byte_width);
         res->nodes_table_width = (1<<10);
         res->nodes_table_mask  = ((1<<10) - 1);
         res->nodes_table_count = 0;
+
+        memset(res->nodes_table, 255, nodes_table_byte_width);
 
         // Array of duplicate tree-nodes (and the top-level node).  Each one
         // is an index into `treenodes`.
@@ -295,7 +286,6 @@ Jelly *new_jelly_ctx () {
 }
 
 void free_jelly_ctx (Jelly *ctx) {
-        free(ctx->desks);
         free(ctx->treenodes);
         free(ctx->pins);
         free(ctx->bars);
@@ -306,44 +296,13 @@ void free_jelly_ctx (Jelly *ctx) {
         free(ctx);
 }
 
-FORCE_INLINE desk_t alloc_desk(Jelly *c) {
-        /*
-                (.pointer) is usually used to point into `treenodes`,
-                but when it's in a freelist, we're using it to point to
-                elements of the desks arena.
-
-                That's why this block has all this weird casting.
-        */
-        if (c->desks_freelist.ix != -1) {
-                int off = c->desks_freelist.ix;
-                c->desks_freelist = (desk_t){ c->desks[off].pointer.ix };
-                return (desk_t){ .ix = off };
-        }
-
-        uint32_t res = c->desks_count++;
-        uint32_t wid = c->desks_width;
-
-        if (res >= wid) {
-                wid = wid + (wid / 2);
-                c->desks = realloc(c->desks, wid * sizeof(FanEntry));
-                c->desks_width = wid;
-        }
-
-        return (desk_t){ .ix = res };
-}
-
-FORCE_INLINE void free_desk(Jelly *c, desk_t w) {
-        c->desks[w.ix].pointer = (treenode_t){ c->desks_freelist.ix };
-        c->desks_freelist = w;
-        return;
-}
 
 FORCE_INLINE treenode_t alloc_treenode(Jelly *c, treenode_value v) {
         uint32_t res = c->treenodes_count++;
         uint32_t wid = c->treenodes_width;
 
         if (res >= wid) {
-                wid = wid + (wid / 2);
+                wid *= 2;
                 c->treenodes = reallocarray(c->treenodes, wid, sizeof(c->treenodes[0]));
                 c->treenodes_width = wid;
         }
@@ -382,28 +341,30 @@ FORCE_INLINE tagged_width_t BAR_TAGGED_WIDTH(uint32_t bytes) {
 // Inserting ///////////////////////////////////////////////////////////////////
 
 typedef struct {
-    uint32_t offset;
-    treenode_value val;
-} InsertResult;
-
-typedef struct {
         tagged_width_t width;
         uint64_t hash;
         uint64_t word;
-        InsertResult (*new_leaf)(Jelly*, leaf_t);
-        treenode_value (*found_leaf)(Jelly*, uint32_t);
+        treenode_t (*new_leaf)(Jelly*, leaf_t);
 } PackedInsertRequest;
 
 typedef struct {
         tagged_width_t width;
         uint64_t hash;
         leaf_t leaf;
-        InsertResult (*new_leaf)(Jelly*, leaf_t);
-        treenode_value (*found_leaf)(Jelly*, uint32_t);
+        treenode_t (*new_leaf)(Jelly*, leaf_t);
 } IndirectInsertRequest;
 
 void jelly_debug_leaves(Jelly*);
 void jelly_debug_interior_nodes(Jelly*);
+
+void rehash_nodes_if_full(Jelly *ctx) {
+        uint32_t num = ctx->nodes_table_count;
+        uint32_t wid = ctx->nodes_table_width;
+
+        if (num*2 >= wid) {
+                die("resize nodes table\n");
+        }
+}
 
 void rehash_leaves_if_full(Jelly *ctx) {
         uint32_t oldwid = ctx->leaves_table_width;
@@ -465,22 +426,8 @@ void rehash_leaves_if_full(Jelly *ctx) {
         jelly_debug_leaves(ctx);
 }
 
-desk_t create_node(Jelly *ctx, uint64_t hash, uint32_t num_bytes, treenode_value val) {
-        treenode_t pointer = alloc_treenode(ctx, val);
 
-        desk_t res = alloc_desk(ctx);
-        FanEntry *ws    = &(ctx->desks[res.ix]);
-
-        ws->num_leaves  = 1;
-        ws->num_bytes   = num_bytes;
-        ws->leaves_hash = hash;
-        ws->row_hash    = 0; // Never used for leaf nodes.
-        ws->pointer     = pointer;
-
-        return res;
-}
-
-desk_t insert_packed_leaf(Jelly *ctx, PackedInsertRequest req) {
+treenode_t insert_packed_leaf(Jelly *ctx, PackedInsertRequest req) {
         uint64_t tag   = (req.width.word >> 62);
         uint64_t bytes = (req.width.word << 2) >> 2;
 
@@ -525,8 +472,11 @@ desk_t insert_packed_leaf(Jelly *ctx, PackedInsertRequest req) {
 
                 if (!match) continue;
 
-                printf("\t\tMATCH: n%d\n", ent->offset);
-                return create_node(ctx, req.hash, bytes, req.found_leaf(ctx, ent->offset));
+                printf("\t\tPACKED_LEAF_MATCH: ");
+                print_tree(ctx, ent->pointer);
+                printf("\n");
+
+                return ent->pointer;
         }
 
         /*
@@ -542,21 +492,25 @@ desk_t insert_packed_leaf(Jelly *ctx, PackedInsertRequest req) {
                 .bytes = (uint8_t*) req.word
         };
 
-        InsertResult leaf_record = req.new_leaf(ctx, leaf);
+        treenode_t pointer = req.new_leaf(ctx, leaf);
+
+        printf("\t\tNEW_PACKED_LEAF: ");
+        print_tree(ctx, pointer);
+        printf("\n");
 
         *ent = (leaves_table_entry_t){
             .hash  = req.hash,
             .width = req.width,
             .bytes = (uint8_t*) req.word,
-            .offset = leaf_record.offset,
+            .pointer = pointer,
         };
 
-        return create_node(ctx, req.hash, bytes, leaf_record.val);
+        return pointer;
 }
 
 void print_nat_leaf(Jelly*, leaf_t);
 
-desk_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
+treenode_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
         printf("\tinsert_indirect_leaf(wid=%u, ", req.leaf.width_bytes);
         print_nat_leaf(ctx, req.leaf);
         printf(")\n");
@@ -592,24 +546,29 @@ desk_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
                 int o = memcmp(ent->bytes, req.leaf.bytes, req.leaf.width_bytes);
                 if (o != 0) continue;
 
-                printf("\t\tMATCH: n%d\n", ent->offset);
+                printf("\t\tINDIRECT_LEAF_MATCH: ");
+                print_tree(ctx, ent->pointer);
+                printf("\n");
 
-                treenode_value v = req.found_leaf(ctx, ent->offset);
-                return create_node(ctx, req.hash, req.leaf.width_bytes, v);
+                return ent->pointer;
         }
 
         ctx->leaves_table_count++;
 
-        InsertResult record = req.new_leaf(ctx, req.leaf);
+        treenode_t pointer = req.new_leaf(ctx, req.leaf);
+
+        printf("\t\tNEW_INDIRECT_LEAF: ");
+        print_tree(ctx, pointer);
+        printf("\n");
 
         *ent = (leaves_table_entry_t){
             .hash  = req.hash,
             .width = req.width,
             .bytes = req.leaf.bytes,
-            .offset = record.offset,
+            .pointer = pointer,
         };
 
-        return create_node(ctx, req.hash, req.leaf.width_bytes, record.val);
+        return pointer;
 }
 
 void push_fan_backref(Jelly *ctx, treenode_t tree) {
@@ -633,7 +592,7 @@ FORCE_INLINE nat_t alloc_nat(Jelly *c) {
         uint32_t wid = c->nats_width;
 
         if (res >= wid) {
-                wid = wid + (wid / 2);
+                wid *= 2;
                 c->nats = reallocarray(c->nats, wid, sizeof(c->nats[0]));
                 c->nats_width = wid;
         }
@@ -641,20 +600,14 @@ FORCE_INLINE nat_t alloc_nat(Jelly *c) {
         return (nat_t){ .ix = res };
 }
 
-static InsertResult
+static treenode_t
 new_nat (Jelly *ctx, leaf_t leaf) {
         nat_t nat = alloc_nat(ctx);
         ctx->nats[nat.ix] = leaf;
-        printf("\t\tNEW_LEAF: n%d\n", nat.ix);
-        return (InsertResult){ .offset = nat.ix, .val = TAG_NAT(nat) };
+        return alloc_treenode(ctx, TAG_NAT(nat));
 }
 
-static treenode_value
-found_nat (Jelly *ctx, uint32_t offset) {
-        return TAG_NAT((nat_t){ .ix = offset });
-}
-
-FORCE_INLINE static desk_t
+FORCE_INLINE static treenode_t
 jelly_packed_nat(Jelly *ctx, uint32_t byte_width, uint64_t word) {
         printf("\tjelly_packed_nat(%lu, width=%u)\n", word, byte_width);
 
@@ -664,12 +617,11 @@ jelly_packed_nat(Jelly *ctx, uint32_t byte_width, uint64_t word) {
                 .hash = fmix64(word),
                 .word = word,
                 .new_leaf = new_nat,
-                .found_leaf = found_nat,
             }
         );
 }
 
-desk_t jelly_nat(Jelly *ctx, leaf_t leaf) {
+treenode_t jelly_nat(Jelly *ctx, leaf_t leaf) {
         printf("\tjelly_nat(width=%d)\n", leaf.width_bytes);
 
         if (leaf.width_bytes < 9) {
@@ -684,7 +636,6 @@ desk_t jelly_nat(Jelly *ctx, leaf_t leaf) {
                         .hash = hash,
                         .leaf = leaf,
                         .new_leaf = new_nat,
-                        .found_leaf = found_nat,
                     }
                 );
         }
@@ -700,7 +651,7 @@ FORCE_INLINE bar_t alloc_bar(Jelly *c) {
         uint32_t wid = c->bars_width;
 
         if (res >= wid) {
-                wid = wid + (wid / 2);
+                wid *= wid;
                 c->bars = reallocarray(c->bars, wid, sizeof(c->bars[0]));
                 c->bars_width = wid;
         }
@@ -708,20 +659,14 @@ FORCE_INLINE bar_t alloc_bar(Jelly *c) {
         return (bar_t){ .ix = res };
 }
 
-static InsertResult
+static treenode_t
 new_bar (Jelly *ctx, leaf_t leaf) {
         bar_t bar = alloc_bar(ctx);
         ctx->bars[bar.ix] = leaf;
-        printf("\t\tNEW_LEAF: b%d\n", bar.ix);
-        return (InsertResult){ .offset = bar.ix, .val = TAG_BAR(bar) };
+        return alloc_treenode(ctx, TAG_BAR(bar));
 }
 
-static treenode_value
-found_bar (Jelly *ctx, uint32_t offset) {
-        return TAG_BAR((bar_t){ .ix = offset });
-}
-
-desk_t jelly_bar(Jelly *ctx, leaf_t leaf) {
+treenode_t jelly_bar(Jelly *ctx, leaf_t leaf) {
         printf("\tjelly_bar(width=%d)\n", leaf.width_bytes);
 
         if (leaf.width_bytes < 9) {
@@ -735,7 +680,6 @@ desk_t jelly_bar(Jelly *ctx, leaf_t leaf) {
                         .hash = fmix64(word),
                         .word = word,
                         .new_leaf = new_bar,
-                        .found_leaf = found_bar,
                     }
                 );
         } else {
@@ -748,7 +692,6 @@ desk_t jelly_bar(Jelly *ctx, leaf_t leaf) {
                         .hash = hash,
                         .leaf = leaf,
                         .new_leaf = new_bar,
-                        .found_leaf = found_bar,
                     }
                 );
         }
@@ -762,7 +705,7 @@ FORCE_INLINE pin_t alloc_pin(Jelly *c) {
         uint32_t wid = c->pins_width;
 
         if (res >= wid) {
-                wid = wid + (wid / 2);
+                wid *= 2;
                 c->pins = reallocarray(c->pins, wid, sizeof(c->pins[0]));
                 c->pins_width = wid;
         }
@@ -770,21 +713,14 @@ FORCE_INLINE pin_t alloc_pin(Jelly *c) {
         return (pin_t){ .ix = res };
 }
 
-static InsertResult
-new_pin (Jelly *ctx, leaf_t leaf) {
+static treenode_t new_pin (Jelly *ctx, leaf_t leaf) {
         hash256_t *hash = (hash256_t*) leaf.bytes;
         pin_t pin = alloc_pin(ctx);
         ctx->pins[pin.ix] = hash;
-        printf("\t\tNEW_LEAF: p%d\n", pin.ix);
-        return (InsertResult){ .offset = pin.ix, .val = TAG_PIN(pin) };
+        return alloc_treenode(ctx, TAG_PIN(pin));
 }
 
-static treenode_value
-found_pin (Jelly *ctx, uint32_t offset) {
-        return TAG_PIN((pin_t){ .ix = offset });
-}
-
-desk_t jelly_pin(Jelly *ctx, hash256_t *pin) {
+treenode_t jelly_pin(Jelly *ctx, hash256_t *pin) {
         printf("\tjelly_pin(hash=%lx)\n", pin->a);
 
         uint64_t hash = pin->a;
@@ -796,7 +732,6 @@ desk_t jelly_pin(Jelly *ctx, hash256_t *pin) {
                 .hash = hash,
                 .leaf = (leaf_t) { .width_bytes = 32, .bytes = (uint8_t*) pin },
                 .new_leaf = new_pin,
-                .found_leaf = found_pin,
             }
         );
 }
@@ -805,102 +740,47 @@ desk_t jelly_pin(Jelly *ctx, hash256_t *pin) {
 // Inserting Nats //////////////////////////////////////////////////////////////
 
 /*
-typedef struct {
-    uint32_t num_leaves;  // total number of interior (non-leaf) nodes in a tree.
-    uint32_t num_bytes;   // total number of bytes in all leaves.
-    uint32_t row_hash;    // = (uint32_t) leaves_hash
-    treenode_t pointer;   // If this is in a `desks` freelist,
-                          // then this is instead an index into the
-                          // desks array.
-    uint64_t leaves_hash; // Summary hash of all leaf-data.
-} FanEntry;
-*/
-
-bool tree_equals(Jelly*, treenode_t, treenode_t);
-
-/*
         Either returns a pointer to a matching treenode, or returns a
         pointer into an empty slot that may be written to.
 */
-FanEntry *find_matching_treenode(Jelly *ctx, FanEntry ent) {
-        uint32_t num = ctx->nodes_table_count;
+treenode_t jelly_cons(Jelly *ctx, treenode_t hed, treenode_t tel) {
+        rehash_nodes_if_full(ctx);
 
-        int i = 0;
+        treenode_value val = TAG_PAIR(hed, tel);
 
-        for (i=0; i<num; i++) {
+        uint64_t target = val.word;
+        uint64_t mask   = ctx->nodes_table_mask;
+
+        uint32_t hash = (uint32_t) fmix64(val.word);
+        uint64_t i = hash;
+
+        for (;; i++) {
+                i &= mask;
+
                 FanEntry *cur = (ctx->nodes_table + i);
 
-                uint32_t row_hash = cur->row_hash;
+                uint64_t word = cur->val.word;
 
-                if (row_hash == 0)            return cur;
-                if (row_hash != ent.row_hash) continue;
+                if (word == target) {
+                        printf("\t\tTREE MATCH @[%04d] = ", cur->pointer.ix);
+                        print_tree(ctx, cur->pointer);
+                        printf("\n");
 
-                FanEntry match = *cur;
+                        return cur->pointer;
+                }
 
-                if ( ent.leaves_hash == match.leaves_hash
-                  && ent.num_leaves == match.num_leaves
-                  && ent.num_bytes == match.num_bytes
-                  && tree_equals(ctx, ent.pointer, match.pointer)
-                   ) {
-                       return cur;
-               }
+                if (word == UINT64_MAX) {
+                        treenode_t pointer = alloc_treenode(ctx, val);
+
+                        cur->val     = val;
+                        cur->hash    = (uint32_t) hash;
+                        cur->pointer = pointer;
+
+                        ctx->nodes_table_count++;
+
+                        return pointer;
+                }
         }
-
-        return (ctx->nodes_table + i);
-}
-
-void print_tree(Jelly*, treenode_t);
-
-desk_t jelly_cons(Jelly *ctx, desk_t hed, desk_t tel) {
-        printf("\tjelly_cons(%i, %i)\n", hed.ix, tel.ix);
-
-        FanEntry h = ctx->desks[hed.ix];
-        FanEntry t = ctx->desks[tel.ix];
-
-        uint32_t num_leaves  = h.num_leaves + t.num_leaves;
-        uint32_t num_bytes   = h.num_bytes  + t.num_bytes;
-        uint64_t leaves_hash = hash_combine(h.leaves_hash, t.leaves_hash);
-
-        treenode_t pointer = alloc_treenode(ctx, TAG_PAIR(h.pointer, t.pointer));
-
-        // Since we "consume" both of the desk entries we've been given,
-        // we can directly re-use the memory from the head.  The tail is
-        // released.
-
-        FanEntry *target    = ctx->desks + hed.ix;
-        target->num_leaves  = num_leaves;
-        target->num_bytes   = num_bytes;
-        target->leaves_hash = leaves_hash;
-        target->row_hash    = (uint32_t) leaves_hash;
-        target->pointer     = pointer;
-
-        free_desk(ctx, tel);
-
-        //////////////////////////////////////////////////////////////////////////
-
-        uint32_t num = ctx->nodes_table_count;
-        uint32_t wid = ctx->nodes_table_width;
-        if (num*2 >= wid) {
-                die("resize nodes table\n");
-        }
-
-        FanEntry *match = find_matching_treenode(ctx, *target);
-
-        // TODO Resize if too big.
-        // DONE Find duplicates.
-        // TODO Duplicates become backrefs.
-        // TODO Turn this into a hash table.
-
-        if (match->row_hash == 0) {
-                *match = *target;
-                ctx->nodes_table_count++;
-        } else {
-                printf("TREE MATCH @[%04d] = ", match->pointer.ix);
-                print_tree(ctx, match->pointer);
-                printf("\n");
-        }
-
-        return hed;
 }
 
 
@@ -937,9 +817,9 @@ uint64_t pack_bytes_lsb(size_t width, char *bytes) {
         return res;
 }
 
-desk_t read_one(Jelly*);
-desk_t read_many(Jelly*, desk_t);
-desk_t read_some(Jelly*);
+treenode_t read_one(Jelly*);
+treenode_t read_many(Jelly*, treenode_t);
+treenode_t read_some(Jelly*);
 
 leaf_t read_hex() {
         size_t count=0, wid=256;
@@ -1044,17 +924,17 @@ leaf_t read_string() {
 
 }
 
-desk_t read_some(Jelly *ctx) {
+treenode_t read_some(Jelly *ctx) {
         return read_many(ctx, read_one(ctx));
 }
 
-desk_t read_many(Jelly *ctx, desk_t acc) {
+treenode_t read_many(Jelly *ctx, treenode_t acc) {
     loop:
         int c = getchar();
 
         switch (c) {
             case '"': {
-                desk_t elmt = jelly_bar(ctx, read_string());
+                treenode_t elmt = jelly_bar(ctx, read_string());
                 acc = jelly_cons(ctx, acc, elmt);
                 goto loop;
             }
@@ -1074,7 +954,7 @@ desk_t read_many(Jelly *ctx, desk_t acc) {
                 // `read_one` also.
                 c = getchar();
                 if (c == 'x') {
-                        desk_t elmt = jelly_nat(ctx, read_hex());
+                        treenode_t elmt = jelly_nat(ctx, read_hex());
                         acc = jelly_cons(ctx, acc, elmt);
                         goto loop;
                 } else if (isdigit(c)) {
@@ -1082,7 +962,7 @@ desk_t read_many(Jelly *ctx, desk_t acc) {
                 } else {
                         ungetc(c, stdin);
                         uint32_t width = word64_bytes(0);
-                        desk_t elmt = jelly_packed_nat(ctx, width, 0);
+                        treenode_t elmt = jelly_packed_nat(ctx, width, 0);
                         acc = jelly_cons(ctx, acc, elmt);
                         goto loop;
                 }
@@ -1091,7 +971,7 @@ desk_t read_many(Jelly *ctx, desk_t acc) {
                 if isdigit(c) {
                         uint64_t word = read_word((uint64_t)(c - '0'));
                         uint32_t width = word64_bytes(word);
-                        desk_t elmt = jelly_packed_nat(ctx, width, word);
+                        treenode_t elmt = jelly_packed_nat(ctx, width, word);
                         acc = jelly_cons(ctx, acc, elmt);
                         goto loop;
                 } else {
@@ -1101,7 +981,7 @@ desk_t read_many(Jelly *ctx, desk_t acc) {
 }
 
 
-desk_t read_one(Jelly *ctx) {
+treenode_t read_one(Jelly *ctx) {
         int c = getchar();
     loop:
         if (isdigit(c)) {
@@ -1135,9 +1015,8 @@ void jelly_dump(Jelly *ctx, uint8_t *buf) {
         strcpy((char*)buf, "\n\nGet fucked, lol\n\n");
 }
 
-void jelly_push_final(Jelly *ctx, desk_t val) {
-        treenode_t tree = ctx->desks[val.ix].pointer;
-        push_fan_backref(ctx, tree);
+void jelly_push_final(Jelly *ctx, treenode_t val) {
+        push_fan_backref(ctx, val);
 }
 
 void print_nat_leaf(Jelly *ctx, leaf_t l) {
@@ -1193,32 +1072,6 @@ size_t print_pin(Jelly *ctx, pin_t pin) {
         return output_size;
 }
 
-bool tree_equals(Jelly *ctx, treenode_t x, treenode_t y) {
-    loop:
-        treenode_value xval = ctx->treenodes[x.ix];
-        treenode_value yval = ctx->treenodes[y.ix];
-
-        if (xval.word == yval.word) {
-                return true;
-        }
-
-        uint64_t x_is_leaf = (xval.word >> 63);
-        uint64_t y_is_leaf = (yval.word >> 63);
-
-        if (x_is_leaf || y_is_leaf) {
-                return false;
-        }
-
-        if (!tree_equals(ctx, NODEVAL_HEAD(xval), NODEVAL_HEAD(yval))) {
-                return false;
-        }
-
-        // tail recursion
-        x = NODEVAL_TAIL(xval);
-        y = NODEVAL_TAIL(yval);
-        goto loop;
-}
-
 void print_tree_outline(Jelly*, treenode_t);
 
 void print_tree_outline_list(Jelly *ctx, treenode_t tree) {
@@ -1262,7 +1115,6 @@ void print_tree_outline(Jelly *ctx, treenode_t tree) {
             }
         }
 }
-
 
 void print_tree(Jelly*, treenode_t);
 
@@ -1327,19 +1179,10 @@ void jelly_debug_leaves(Jelly *ctx) {
                 // Empty slot
                 if (ent.hash == 0) continue;
 
-                switch (ent.width.word >> 62) {
-                    case 2:
-                        printf("\t\t[%04d] p%d = ", i, ent.offset);
-                        print_pin(ctx, (pin_t){ .ix = ent.offset });
-                        break;
-                    case 3:
-                        printf("\t\t[%04d] b%d = ", i, ent.offset);
-                        print_bar(ctx, (bar_t){ .ix = ent.offset });
-                        break;
-                    default:
-                        printf("\t\t[%04d] n%d = ", i, ent.offset);
-                        print_nat(ctx, (nat_t){ .ix = ent.offset });
-                }
+                printf("\t\t[%04d] ", i);
+                print_tree_outline(ctx, ent.pointer);
+                printf(" = ");
+                print_tree(ctx, ent.pointer);
 
                 uint64_t width = ((ent.width.word << 2) >> 2);
                 uint64_t bin = ent.hash & mask;
@@ -1358,26 +1201,23 @@ void jelly_debug_interior_nodes(Jelly *ctx) {
 
         int wid = ctx->nodes_table_width;
 
+        uint64_t mask = ctx->nodes_table_mask;
+
         for (int i=0; i<wid; i++) {
                 FanEntry ent = ctx->nodes_table[i];
 
                 // Empty slot
-                if (ent.num_leaves == 0) continue;
+                if (ent.val.word == UINT64_MAX) continue;
 
-                printf("\n\t\t[%04d] = @%u -> ", i, ent.pointer.ix);
-                if (ent.num_leaves < 10) {
-                        print_tree(ctx, ent.pointer);
-                        printf("\n\n");
-                } else {
-                        printf("[long]\n\n");
-                }
+                uint64_t bin = ent.hash & mask;
+                uint64_t distance = (((uint64_t)i) - bin);
 
-                printf("\t\t  ");
-                print_tree_outline(ctx, ent.pointer);
-                printf("\n\n");
+                printf("\t\t[%04d] = @%u\tbin=%lu\tdist=%lu\thash=%08x\n", i, ent.pointer.ix, bin, distance, ent.hash);
 
-                printf("\t\t  num_{leaves,bytes}: %u %u\n", ent.num_leaves, ent.num_bytes);
-                printf("\t\t  {row,leaves}_hash: 0x%08x 0x%016lx\n", ent.row_hash, ent.leaves_hash);
+                // printf("\n\n\t\t  ");
+                // print_tree(ctx, ent.pointer);
+                // print_tree_outline(ctx, ent.pointer);
+                // printf("\n\n");
         }
 }
 
@@ -1385,20 +1225,8 @@ void jelly_debug_interior_nodes(Jelly *ctx) {
 void jelly_debug(Jelly *ctx) {
         printf("\njelly_debug():\n");
 
-        {
-                int free_desks = 0;
-                int32_t tmp = ctx->desks_freelist.ix;
-                while (tmp != -1) {
-                        tmp = ctx->desks[tmp].pointer.ix;
-                        free_desks++;
-                }
-                printf("\n\tdesks: (width=%u count=%u free=%d)\n",
-                       ctx->desks_width,
-                       ctx->desks_count,
-                       free_desks);
-        }
-
         jelly_debug_leaves(ctx);
+
         jelly_debug_interior_nodes(ctx);
 
         uint32_t count = ctx->fans_count;
@@ -1486,8 +1314,8 @@ int main () {
 
         hash256_t dumb_hash_1 = { fmix64(111111), fmix64(65535), fmix64(9),  65536 };
         hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
-        desk_t top = read_some(ctx);
-        desk_t tmp = jelly_pin(ctx, &dumb_hash_1);
+        treenode_t top = read_some(ctx);
+        treenode_t tmp = jelly_pin(ctx, &dumb_hash_1);
         top = jelly_cons(ctx, tmp, top);
         tmp = jelly_pin(ctx, &dumb_hash_1);
         top = jelly_cons(ctx, tmp, top);
@@ -1495,7 +1323,6 @@ int main () {
         top = jelly_cons(ctx, tmp, top);
 
         jelly_push_final(ctx, top);
-        free_desk(ctx, top);
 
         int wid = jelly_buffer_size(ctx);
         uint8_t *buf = calloc(wid, sizeof(uint8_t));
