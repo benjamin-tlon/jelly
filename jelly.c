@@ -69,8 +69,8 @@ uint32_t word64_bytes (uint64_t w) {
 // Types ///////////////////////////////////////////////////////////////////////
 
 /*
-    "Workspaces" are temporary `FanEntry`s used while building up a tree
-    to be serialized.
+    "deks" are temporary `FanEntry`s used while building up a tree to
+    be serialized.
 
     Pins : Map Hash256 Offset    <<  64 bits (word32 hash_fragment, word32 offset)
     Word : Map Word Offset       << 128 bits (word64 word, word64 offset)
@@ -87,15 +87,15 @@ typedef struct { uint32_t ix; } bar_t;        //  Index into Jelly.bars
 typedef struct { uint32_t ix; } nat_t;        //  Index into Jelly.nats
 typedef struct { uint32_t ix; } fan_t;        //  Index into Jelly.fans
 typedef struct { uint32_t ix; } treenode_t;   //  Index into Jelly.treenodes
-typedef struct { uint32_t ix; } workspace_t;  //  Index into Jelly.workspaces
+typedef struct { uint32_t ix; } desk_t;       //  Index into Jelly.desks
 
 typedef struct {
     uint32_t num_leaves;  // total number of interior (non-leaf) nodes in a tree.
     uint32_t num_bytes;   // total number of bytes in all leaves.
     uint32_t row_hash;    // = (uint32_t) hash_combine(leaves_hash, shape_hash);
-    treenode_t pointer;   // If this is in a `workspaces` freelist,
+    treenode_t pointer;   // If this is in a `desks` freelist,
                           // then this is instead an index into the
-                          // workspaces array.
+                          // desks array.
     uint64_t leaves_hash; // Summary hash of all leaf-data.
     uint64_t shape_hash;  // Summary hash of the tree shape.
 } FanEntry;
@@ -140,10 +140,10 @@ typedef struct leaf {
 
 typedef struct jelly_ctx {
     // Ephemeral entries used during construction (recursive stack frames).
-    FanEntry *workspaces;
-    int32_t workspaces_width;
-    int32_t workspaces_count;
-    workspace_t workspaces_freelist;
+    FanEntry *desks;
+    int32_t desks_width;
+    int32_t desks_count;
+    desk_t desks_freelist;
 
     // One entry per tree-node
     treenode_value *treenodes;
@@ -169,13 +169,13 @@ typedef struct jelly_ctx {
     leaves_table_entry_t *leaves_table;
     uint32_t leaves_table_width;
     uint32_t leaves_table_count;
-    uint64_t leaves_table_width_mask;
+    uint64_t leaves_table_mask;
 
     // Interior-Node Deduplication table.
     FanEntry *nodes_table;
     uint32_t nodes_table_width;
     uint32_t nodes_table_count;
-    uint64_t nodes_table_width_mask;
+    uint64_t nodes_table_mask;
 
     // Array of duplicate tree-nodes (and the top-level node).  Each one
     // is an index into `treenodes`.
@@ -250,10 +250,10 @@ FORCE_INLINE pin_t TREENODE_VAL_PIN(treenode_value v) {
 
 Jelly *new_jelly_ctx () {
         Jelly *res = malloc(sizeof(Jelly));
-        res->workspaces          = calloc(32, sizeof(res->workspaces[0]));
-        res->workspaces_width    = 32;
-        res->workspaces_count    = 0;
-        res->workspaces_freelist = (workspace_t){-1};
+        res->desks          = calloc(32, sizeof(res->desks[0]));
+        res->desks_width    = 32;
+        res->desks_count    = 0;
+        res->desks_freelist = (desk_t){-1};
 
         res->treenodes       = calloc(32, sizeof(res->treenodes[0]));
         res->treenodes_width = 32;
@@ -275,16 +275,16 @@ Jelly *new_jelly_ctx () {
         res->nats_count = 0;
 
         // Deduplication table for leaves
-        res->leaves_table            = calloc((1<<2), sizeof(res->leaves_table[0]));
-        res->leaves_table_width      = (1<<2);
-        res->leaves_table_width_mask = ((1<<2) - 1);
-        res->leaves_table_count      = 0;
+        res->leaves_table       = calloc((1<<2), sizeof(res->leaves_table[0]));
+        res->leaves_table_width = (1<<2);
+        res->leaves_table_mask  = ((1<<2) - 1);
+        res->leaves_table_count = 0;
 
         // Deduplication table for interior nodes
-        res->nodes_table            = calloc((1<<10), sizeof(res->nodes_table[0]));
-        res->nodes_table_width      = (1<<10);
-        res->nodes_table_width_mask = ((1<<10) - 1);
-        res->nodes_table_count      = 0;
+        res->nodes_table       = calloc((1<<10), sizeof(res->nodes_table[0]));
+        res->nodes_table_width = (1<<10);
+        res->nodes_table_mask  = ((1<<10) - 1);
+        res->nodes_table_count = 0;
 
         // Array of duplicate tree-nodes (and the top-level node).  Each one
         // is an index into `treenodes`.
@@ -296,7 +296,7 @@ Jelly *new_jelly_ctx () {
 }
 
 void free_jelly_ctx (Jelly *ctx) {
-        free(ctx->workspaces);
+        free(ctx->desks);
         free(ctx->treenodes);
         free(ctx->pins);
         free(ctx->bars);
@@ -307,35 +307,35 @@ void free_jelly_ctx (Jelly *ctx) {
         free(ctx);
 }
 
-FORCE_INLINE workspace_t alloc_workspace(Jelly *c) {
+FORCE_INLINE desk_t alloc_desk(Jelly *c) {
         /*
                 (.pointer) is usually used to point into `treenodes`,
                 but when it's in a freelist, we're using it to point to
-                elements of the workspaces arena.
+                elements of the desks arena.
 
                 That's why this block has all this weird casting.
         */
-        if (c->workspaces_freelist.ix != -1) {
-                int off = c->workspaces_freelist.ix;
-                c->workspaces_freelist = (workspace_t){ c->workspaces[off].pointer.ix };
-                return (workspace_t){ .ix = off };
+        if (c->desks_freelist.ix != -1) {
+                int off = c->desks_freelist.ix;
+                c->desks_freelist = (desk_t){ c->desks[off].pointer.ix };
+                return (desk_t){ .ix = off };
         }
 
-        uint32_t res = c->workspaces_count++;
-        uint32_t wid = c->workspaces_width;
+        uint32_t res = c->desks_count++;
+        uint32_t wid = c->desks_width;
 
         if (res >= wid) {
                 wid = wid + (wid / 2);
-                c->workspaces = realloc(c->workspaces, wid * sizeof(FanEntry));
-                c->workspaces_width = wid;
+                c->desks = realloc(c->desks, wid * sizeof(FanEntry));
+                c->desks_width = wid;
         }
 
-        return (workspace_t){ .ix = res };
+        return (desk_t){ .ix = res };
 }
 
-FORCE_INLINE void free_workspace(Jelly *c, workspace_t w) {
-        c->workspaces[w.ix].pointer = (treenode_t){ c->workspaces_freelist.ix };
-        c->workspaces_freelist = w;
+FORCE_INLINE void free_desk(Jelly *c, desk_t w) {
+        c->desks[w.ix].pointer = (treenode_t){ c->desks_freelist.ix };
+        c->desks_freelist = w;
         return;
 }
 
@@ -425,7 +425,8 @@ void rehash_leaves_if_full(Jelly *ctx) {
 
         printf("\tcalloc(%u * %lu = %lu)\n", newwid, sizeof(*newtab), newwid*sizeof(*newtab));
 
-        uint64_t newmask = (ctx->leaves_table_width_mask << 1) | 1;
+        // e.g. 0b111 -> 0b1111
+        uint64_t newmask = (ctx->leaves_table_mask << 1) | 1;
 
         printf("\tnewmask = %lu\n", newmask);
 
@@ -457,19 +458,19 @@ void rehash_leaves_if_full(Jelly *ctx) {
 
         free(ctx->leaves_table);
 
-        ctx->leaves_table_width      = newwid;
-        ctx->leaves_table_width_mask = newmask;
-        ctx->leaves_table            = newtab;
+        ctx->leaves_table_width = newwid;
+        ctx->leaves_table_mask  = newmask;
+        ctx->leaves_table       = newtab;
 
         printf("NEW TABLE:\n");
         jelly_debug_leaves(ctx);
 }
 
-workspace_t create_node(Jelly *ctx, uint64_t hash, uint32_t num_bytes, treenode_value val) {
+desk_t create_node(Jelly *ctx, uint64_t hash, uint32_t num_bytes, treenode_value val) {
         treenode_t pointer = alloc_treenode(ctx, val);
 
-        workspace_t res = alloc_workspace(ctx);
-        FanEntry *ws    = &(ctx->workspaces[res.ix]);
+        desk_t res = alloc_desk(ctx);
+        FanEntry *ws    = &(ctx->desks[res.ix]);
 
         ws->num_leaves  = 1;
         ws->num_bytes   = num_bytes;
@@ -481,7 +482,7 @@ workspace_t create_node(Jelly *ctx, uint64_t hash, uint32_t num_bytes, treenode_
         return res;
 }
 
-workspace_t insert_packed_leaf(Jelly *ctx, PackedInsertRequest req) {
+desk_t insert_packed_leaf(Jelly *ctx, PackedInsertRequest req) {
         uint64_t tag   = (req.width.word >> 62);
         uint64_t bytes = (req.width.word << 2) >> 2;
 
@@ -510,7 +511,7 @@ workspace_t insert_packed_leaf(Jelly *ctx, PackedInsertRequest req) {
 
         leaves_table_entry_t *ent = NULL;
 
-        uint64_t mask = ctx->leaves_table_width_mask;
+        uint64_t mask = ctx->leaves_table_mask;
         uint64_t ix = req.hash;
 
         for (;; ix++) {
@@ -557,7 +558,7 @@ workspace_t insert_packed_leaf(Jelly *ctx, PackedInsertRequest req) {
 
 void print_nat_leaf(Jelly*, leaf_t);
 
-workspace_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
+desk_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
         printf("\tinsert_indirect_leaf(wid=%u, ", req.leaf.width_bytes);
         print_nat_leaf(ctx, req.leaf);
         printf(")\n");
@@ -577,7 +578,7 @@ workspace_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
 
         leaves_table_entry_t *ent;
 
-        uint64_t mask = ctx->leaves_table_width_mask;
+        uint64_t mask = ctx->leaves_table_mask;
         uint64_t ix = req.hash;
 
         for (;; ix++) {
@@ -655,7 +656,7 @@ found_nat (Jelly *ctx, uint32_t offset) {
         return TAG_NAT((nat_t){ .ix = offset });
 }
 
-FORCE_INLINE static workspace_t
+FORCE_INLINE static desk_t
 jelly_packed_nat(Jelly *ctx, uint32_t byte_width, uint64_t word) {
         printf("\tjelly_packed_nat(%lu, width=%u)\n", word, byte_width);
 
@@ -670,7 +671,7 @@ jelly_packed_nat(Jelly *ctx, uint32_t byte_width, uint64_t word) {
         );
 }
 
-workspace_t jelly_nat(Jelly *ctx, leaf_t leaf) {
+desk_t jelly_nat(Jelly *ctx, leaf_t leaf) {
         printf("\tjelly_nat(width=%d)\n", leaf.width_bytes);
 
         if (leaf.width_bytes < 9) {
@@ -722,7 +723,7 @@ found_bar (Jelly *ctx, uint32_t offset) {
         return TAG_BAR((bar_t){ .ix = offset });
 }
 
-workspace_t jelly_bar(Jelly *ctx, leaf_t leaf) {
+desk_t jelly_bar(Jelly *ctx, leaf_t leaf) {
         printf("\tjelly_bar(width=%d)\n", leaf.width_bytes);
 
         if (leaf.width_bytes < 9) {
@@ -785,7 +786,7 @@ found_pin (Jelly *ctx, uint32_t offset) {
         return TAG_PIN((pin_t){ .ix = offset });
 }
 
-workspace_t jelly_pin(Jelly *ctx, hash256_t *pin) {
+desk_t jelly_pin(Jelly *ctx, hash256_t *pin) {
         printf("\tjelly_pin(hash=%lx)\n", pin->a);
 
         uint64_t hash = pin->a;
@@ -805,11 +806,11 @@ workspace_t jelly_pin(Jelly *ctx, hash256_t *pin) {
 
 // Inserting Nats //////////////////////////////////////////////////////////////
 
-workspace_t jelly_cons(Jelly *ctx, workspace_t hed, workspace_t tel) {
+desk_t jelly_cons(Jelly *ctx, desk_t hed, desk_t tel) {
         printf("\tjelly_cons(%i, %i)\n", hed.ix, tel.ix);
 
-        FanEntry h = ctx->workspaces[hed.ix];
-        FanEntry t = ctx->workspaces[tel.ix];
+        FanEntry h = ctx->desks[hed.ix];
+        FanEntry t = ctx->desks[tel.ix];
 
         uint32_t num_leaves  = h.num_leaves + t.num_leaves;
         uint32_t num_bytes   = h.num_bytes  + t.num_bytes;
@@ -846,11 +847,11 @@ workspace_t jelly_cons(Jelly *ctx, workspace_t hed, workspace_t tel) {
 
         treenode_t pointer = alloc_treenode(ctx, TAG_PAIR(h.pointer, t.pointer));
 
-        // Since we "consume" both of the workspace entries we've been given,
+        // Since we "consume" both of the desk entries we've been given,
         // we can directly re-use the memory from the head.  The tail is
         // released.
 
-        FanEntry *target    = ctx->workspaces + hed.ix;
+        FanEntry *target    = ctx->desks + hed.ix;
         target->num_leaves  = num_leaves;
         target->num_bytes   = num_bytes;
         target->leaves_hash = leaves_hash;
@@ -858,7 +859,7 @@ workspace_t jelly_cons(Jelly *ctx, workspace_t hed, workspace_t tel) {
         target->row_hash    = (uint32_t) hash_combine(leaves_hash, shape_hash);
         target->pointer     = pointer;
 
-        free_workspace(ctx, tel);
+        free_desk(ctx, tel);
 
         // TODO Resize if too big.
         // TODO Search for duplicates (if we find a duplicate, we must
@@ -904,9 +905,9 @@ uint64_t pack_bytes_lsb(size_t width, char *bytes) {
         return res;
 }
 
-workspace_t read_one(Jelly*);
-workspace_t read_many(Jelly*, workspace_t);
-workspace_t read_some(Jelly*);
+desk_t read_one(Jelly*);
+desk_t read_many(Jelly*, desk_t);
+desk_t read_some(Jelly*);
 
 leaf_t read_hex() {
         size_t count=0, wid=256;
@@ -1011,17 +1012,17 @@ leaf_t read_string() {
 
 }
 
-workspace_t read_some(Jelly *ctx) {
+desk_t read_some(Jelly *ctx) {
         return read_many(ctx, read_one(ctx));
 }
 
-workspace_t read_many(Jelly *ctx, workspace_t acc) {
+desk_t read_many(Jelly *ctx, desk_t acc) {
     loop:
         int c = getchar();
 
         switch (c) {
             case '"': {
-                workspace_t elmt = jelly_bar(ctx, read_string());
+                desk_t elmt = jelly_bar(ctx, read_string());
                 acc = jelly_cons(ctx, acc, elmt);
                 goto loop;
             }
@@ -1041,7 +1042,7 @@ workspace_t read_many(Jelly *ctx, workspace_t acc) {
                 // `read_one` also.
                 c = getchar();
                 if (c == 'x') {
-                        workspace_t elmt = jelly_nat(ctx, read_hex());
+                        desk_t elmt = jelly_nat(ctx, read_hex());
                         acc = jelly_cons(ctx, acc, elmt);
                         goto loop;
                 } else if (isdigit(c)) {
@@ -1049,7 +1050,7 @@ workspace_t read_many(Jelly *ctx, workspace_t acc) {
                 } else {
                         ungetc(c, stdin);
                         uint32_t width = word64_bytes(0);
-                        workspace_t elmt = jelly_packed_nat(ctx, width, 0);
+                        desk_t elmt = jelly_packed_nat(ctx, width, 0);
                         acc = jelly_cons(ctx, acc, elmt);
                         goto loop;
                 }
@@ -1058,7 +1059,7 @@ workspace_t read_many(Jelly *ctx, workspace_t acc) {
                 if isdigit(c) {
                         uint64_t word = read_word((uint64_t)(c - '0'));
                         uint32_t width = word64_bytes(word);
-                        workspace_t elmt = jelly_packed_nat(ctx, width, word);
+                        desk_t elmt = jelly_packed_nat(ctx, width, word);
                         acc = jelly_cons(ctx, acc, elmt);
                         goto loop;
                 } else {
@@ -1068,7 +1069,7 @@ workspace_t read_many(Jelly *ctx, workspace_t acc) {
 }
 
 
-workspace_t read_one(Jelly *ctx) {
+desk_t read_one(Jelly *ctx) {
         int c = getchar();
     loop:
         if (isdigit(c)) {
@@ -1102,8 +1103,8 @@ void jelly_dump(Jelly *ctx, uint8_t *buf) {
         strcpy((char*)buf, "\n\nGet fucked, lol\n\n");
 }
 
-void jelly_push_final(Jelly *ctx, workspace_t val) {
-        treenode_t tree = ctx->workspaces[val.ix].pointer;
+void jelly_push_final(Jelly *ctx, desk_t val) {
+        treenode_t tree = ctx->desks[val.ix].pointer;
         push_fan_backref(ctx, tree);
 }
 
@@ -1215,6 +1216,8 @@ void jelly_debug_leaves(Jelly *ctx) {
 
         int wid = ctx->leaves_table_width;
 
+        uint64_t mask = ctx->leaves_table_mask;
+
         for (int i=0; i<wid; i++) {
                 leaves_table_entry_t ent = ctx->leaves_table[i];
 
@@ -1236,8 +1239,11 @@ void jelly_debug_leaves(Jelly *ctx) {
                 }
 
                 uint64_t width = ((ent.width.word << 2) >> 2);
-                printf("\n\t\t  width: %-4lu", width);
-                printf("\n\t\t  hash: 0x%016lx\n", ent.hash);
+                uint64_t bin = ent.hash & mask;
+                uint64_t distance = (((uint64_t)i) - bin);
+                printf("\n\t\t    bytes: %-4lu", width);
+                printf("\n\t\t    bin: %lu [dist=%lu]", bin, distance);
+                printf("\n\t\t    hash: 0x%016lx\n", ent.hash);
         }
 }
 
@@ -1255,20 +1261,16 @@ void jelly_debug_interior_nodes(Jelly *ctx) {
                 // Empty slot
                 if (ent.num_leaves == 0) continue;
 
+                printf("\n\t\t[%04d] = @%u -> ", i, ent.pointer.ix);
                 if (ent.num_leaves < 10) {
-                        printf("\n\t\t[%04d] = ", i);
                         print_tree(ctx, ent.pointer);
                         printf("\n\n");
                 } else {
-                        printf("\n\t\t[%04d] = [long]\n\n", i);
+                        printf("[long]\n\n");
                 }
 
-                printf("\t\t\tpointer: %u\n", ent.pointer.ix);
-                printf("\t\t\tnum_leaves: %u\n", ent.num_leaves);
-                printf("\t\t\tnum_bytes: %u\n", ent.num_bytes);
-                printf("\t\t\trow_hash: 0x%08x\n", ent.row_hash);
-                printf("\t\t\tleaves_hash: 0x%016lx\n", ent.leaves_hash);
-                printf("\t\t\tshape_hash: 0x%016lx\n", ent.shape_hash);
+                printf("\t\t  num_{leaves,bytes}: %u %u\n", ent.num_leaves, ent.num_bytes);
+                printf("\t\t  {row,leaves,shape}_hash: 0x%08x 0x%016lx 0x%016lx\n", ent.row_hash, ent.leaves_hash, ent.shape_hash);
         }
 }
 
@@ -1277,16 +1279,16 @@ void jelly_debug(Jelly *ctx) {
         printf("\njelly_debug():\n");
 
         {
-                int free_workspaces = 0;
-                int32_t tmp = ctx->workspaces_freelist.ix;
+                int free_desks = 0;
+                int32_t tmp = ctx->desks_freelist.ix;
                 while (tmp != -1) {
-                        tmp = ctx->workspaces[tmp].pointer.ix;
-                        free_workspaces++;
+                        tmp = ctx->desks[tmp].pointer.ix;
+                        free_desks++;
                 }
-                printf("\n\tworkspaces: (width=%u count=%u free=%d)\n",
-                       ctx->workspaces_width,
-                       ctx->workspaces_count,
-                       free_workspaces);
+                printf("\n\tdesks: (width=%u count=%u free=%d)\n",
+                       ctx->desks_width,
+                       ctx->desks_count,
+                       free_desks);
         }
 
         jelly_debug_leaves(ctx);
@@ -1377,8 +1379,8 @@ int main () {
 
         hash256_t dumb_hash_1 = { fmix64(111111), fmix64(65535), fmix64(9),  65536 };
         hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
-        workspace_t top = read_some(ctx);
-        workspace_t tmp = jelly_pin(ctx, &dumb_hash_1);
+        desk_t top = read_some(ctx);
+        desk_t tmp = jelly_pin(ctx, &dumb_hash_1);
         top = jelly_cons(ctx, tmp, top);
         tmp = jelly_pin(ctx, &dumb_hash_1);
         top = jelly_cons(ctx, tmp, top);
@@ -1386,7 +1388,7 @@ int main () {
         top = jelly_cons(ctx, tmp, top);
 
         jelly_push_final(ctx, top);
-        free_workspace(ctx, top);
+        free_desk(ctx, top);
 
         int wid = jelly_buffer_size(ctx);
         uint8_t *buf = calloc(wid, sizeof(uint8_t));
