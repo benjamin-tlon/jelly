@@ -1,26 +1,27 @@
--   TODO Track the recursion depth.
+-   TODO Cannibalize the refcounts table.
 
-    Just store a ctx->maximum_depth field.
+    The refcounts taable is (32bits * num_nodes), which is always bigger
+    than (32bits * max_depth).
 
-    This will be an over-estimate in some cases (if there are
-    back-references, then it's possible that the deepest part will live
-    in a fragment).  However, it is still a valid upper-bound and it is
-    still a reasonable estimate.
+    We only need it for shatter(), so we can just canibalize it, and
+    use that memory for the fragment-serialization stack.
 
-    -   TODO Use the maximum_depth field to pre-allocate a stack during
-        bit-serialization, don't use recursion.
-
--   TODO Actually serialize.
+    -   TODO Remove the `stack[128] /* TODO */` nonsense, and just reuse
+        memory like the above suggests.
 
 -   TODO Deserialize to a fresh jelly context.
 
     -   Just read each leaf, and append directly to the respective tables
-        (do not populate the dedupe tables, just assume they are unique).
+
+    -   Do not populate the dedupe tables.
 
     -   Then, read each fan.
 
-    -   Then, read each fan.  All references get looked up in the
-        prior tables.
+    -   All references get looked up in the prior tables.
+
+    -   Reading the fans will definitely be the trickiest part here,
+        since we will need to maintain bit-offset counts, like we do
+        on serialization.
 
 -   TODO Final test-harness print should be the deserialized context.
 
@@ -36,25 +37,11 @@
 
 ## Encoding and Decoding
 
--   TODO Write code to dump a larger byte-string.
-
-    -   number<128 -> one byte
-    -   size<128   -> one byte length + bytes
-    -   otherwise  -> one byte length-of-length + length + bytes
-
-    TODO: Fast way to byte-dump a word?  Just mask and shift (n<8) times?
-
 -   TODO Write code to decode a larger byte-string.
 
     - high bit is 0xxxxxxx? -> read one byte
     - high two bits are 10xxxxx? -> read 0bxxxxxx byte value
     - high two bits are 11xxxxx? -> read 0bxxxxxx byte length (and then length-byte value)
-
--   TODO Write code to encode the leaf-set:
-
-    -   length_prefixed(pins)
-    -   length_prefixed(varchar(bar) * bars)
-    -   length_prefixed(varchar(nat) * nats)
 
 -   TODO Write code to decode the leaf-set:
 
@@ -67,79 +54,14 @@
     I guess we need to keep track of that at every step, which is
     annoyingly expensive.
 
--   DONE Determine the maximum stack-size required for serializaion.
+-   TODO Fragment serializer uses words instead of bytes.
 
-    It's just the tree depth.
+    -   DONE Make sure that the buffer-size that we allocate has a size that's a multiple of 8.
 
--   TODO Write code to bit-encode a fan with fixed-size leaves.
+    -   TODO Calculate the next word that contains the starting byte.
 
-    -   Do this byte-wise at first.  Leave word-wise encoding as an optimization.
-    -   As a short-term hack, only support working with leaf sizes <9 bits.
+    -   TODO Calculate the bit-index into that word where the writing should start.
 
-    -   Algorithm:
+    -   TODO Initialize the accumulator by reading the current state of that work.
 
-        -   One function call, use goto for flow control.
-
-        -   Precalculate maximum stack size (workspace entry should record this).
-
-        -   Maintain State
-
-            -   a stack (array of int)
-            -   current stack pointer (index into array).
-            -   A pointer into the output buffer.
-            -   An accumulator byte.
-            -   An overflow byte.
-            -   The number of bits that have been written to the accumulator.
-
-        -   To write n bits:
-
-                acc          |= ((value << bits_written) >> bits_written)
-                overflow      = (value >> (8 - bits_written))
-                bits_written += value_width
-
-                if (bits_written >= 8) {
-                    *buf++ = acc;
-                    acc = overflow
-                    bits_written -= 8.
-                }
-
-        -   To advance the position (by one bit).
-
-                bits_written = (bits_written + 1) % 8;
-                if (!bits_written) {
-                    *buf++ = acc;
-                    acc = 0;
-                }
-
-        -   If we encounter a tree-node, set the current bit.
-
-                acc |= (1 << bits_written);
-                ADVANCE;
-                push(tail);
-                push(head);
-                goto loop;
-
-        -   If we encounter a leaf-node.
-
-                offsets = [0, pins_count, pins_count+bars_count, pins_count+bars_count+nats_coun]
-                ADVANCE;
-                val = node_value + offsets[node_type]
-                WRITE_BITS;
-
-        -   Finally
-
-                if (bits_written) {
-                    *buf = acc
-                }
-
-    -   Supporting word buffering:
-
-        -   Make sure that the buffer-size that we allocate has a size that's a multiple of 8.
-
-        -   Calculate the next word that contains the starting byte.
-
-        -   Calculate the bit-index into that word where the writing should start.
-
-        -   Initialize the accumulator by reading the current state of that work.
-
-        -   Replace 8 with 64 as the bit-offset in which we flush to the buffer.
+    -   TODO Replace 8 with 64 as the bit-offset in which we flush to the buffer.
