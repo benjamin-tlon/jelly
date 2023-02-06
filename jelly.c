@@ -949,7 +949,12 @@ void print_bar(Jelly*, bar_t);
 void print_nat(Jelly*, nat_t);
 void print_fragment_outline(Jelly*, frag_t);
 
-char *serialize(Jelly *ctx) {
+struct serialize {
+        char *buf;
+        size_t wid;
+};
+
+struct serialize serialize(Jelly *ctx) {
         uint64_t width = 0;
         uint64_t refrs = 0;
 
@@ -1016,6 +1021,8 @@ char *serialize(Jelly *ctx) {
 
         printf("buffer_bytes (unpadded) = %lu\n", width);
 
+        size_t total_byte_width = width;
+
         // Result is always a multiple of 8 (so we can treat it as an
         // array of 64-bit words);
         uint64_t hanging_bytes = width % 8;
@@ -1023,7 +1030,7 @@ char *serialize(Jelly *ctx) {
 
         printf("buffer_bytes = %lu\n", width);
 
-        return calloc(1, width);
+        return (struct serialize) { .buf = calloc(1, width), .wid = total_byte_width };
 }
 
 
@@ -1254,14 +1261,6 @@ treenode_t read_one(Jelly *ctx) {
             default:
                 die("Unexpected character: %c (read_one)\n", c);
         }
-}
-
-int jelly_buffer_size(Jelly *ctx) {
-        return 1 + strlen("\n\nTODO\n\n");
-}
-
-void jelly_dump(Jelly *ctx, uint8_t *buf) {
-        strcpy((char*)buf, "\n\nTODO\n\n");
 }
 
 void print_nat_leaf(Jelly *ctx, leaf_t l) {
@@ -1607,20 +1606,14 @@ int main () {
 
         shatter(ctx, top, true);
 
-        int wid = jelly_buffer_size(ctx);
-
-        uint8_t *buf = calloc(wid, sizeof(uint8_t));
-
         jelly_debug(ctx);
 
-        jelly_dump(ctx, buf);
-        fwrite(buf, 1, wid, stdout);
+        struct serialize ser = serialize(ctx);
 
-        char *buf2 = serialize(ctx);
+        // fwrite(ser.buf, 1, ser.wid, stdout);
 
-        free(buf2);
+        free(ser.buf);
         free_jelly_ctx(ctx);
-        free(buf);
 
 
         return 0;
