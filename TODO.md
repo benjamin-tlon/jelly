@@ -10,11 +10,6 @@
     -   TODO Use the maximum_depth field to pre-allocate a stack during
         bit-serialization, don't use recursion.
 
--   TODO Calculate resulting buffer size.
-
-    -   The logic for this exists already, I think as a comment in the
-        Haskell code?
-
 -   TODO Actually serialize.
 
 -   TODO Deserialize to a fresh jelly context.

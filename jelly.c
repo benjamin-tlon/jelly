@@ -48,6 +48,11 @@ size_t hash_combine(uint64_t x, uint64_t y) {
 
 #define die(...) (fprintf(stderr, __VA_ARGS__),exit(1))
 
+// TODO: Testing.
+FORCE_INLINE uint32_t word64_bits (uint64_t w) {
+        return 64 - __builtin_clzll(w);
+}
+
 /*
         What is the byte-width of a 64-bit word?
 
@@ -57,9 +62,10 @@ size_t hash_combine(uint64_t x, uint64_t y) {
         TODO: This should return 0 for 0, but it seems to return 1.
 */
 uint32_t word64_bytes (uint64_t w) {
-        uint32_t bits  = 64 - __builtin_clzll(w);
+        uint32_t bits = word64_bits(w);
         return (bits/8) + !!(bits%8);
 }
+
 
 
 // Types ///////////////////////////////////////////////////////////////////////
@@ -84,9 +90,10 @@ typedef struct { uint32_t ix; } nat_t;        //  Index into Jelly.nats
 typedef struct { uint32_t ix; } frag_t;       //  Index into Jelly.frags
 typedef struct { uint32_t ix; } treenode_t;   //  Index into Jelly.treenodes
 
-typedef struct fragment {
+typedef struct {
         treenode_t head;
         treenode_t tail;
+        uint32_t leaves;
 } FragVal;
 
 typedef struct treenode_value {
@@ -639,7 +646,7 @@ treenode_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
         and then we insert
 */
 
-void fragment(Jelly *ctx, treenode_t tree) {
+void frag(Jelly *ctx, treenode_t tree, uint32_t leaf_count) {
         treenode_value val = ctx->treenodes[tree.ix];
 
         // Ignore leaves and already-fragmented values.
@@ -663,35 +670,46 @@ void fragment(Jelly *ctx, treenode_t tree) {
                 ctx->frags_width = wid;
         }
 
-        ctx->frags[nex] = (FragVal){ .head = hed, .tail = tel };
+        printf("%u", leaf_count);
+
+        ctx->frags[nex] = (FragVal){ .head = hed, .tail = tel, .leaves = leaf_count };
 
         ctx->treenodes[tree.ix] = TAG_FRAG((frag_t) { .ix = nex });
 }
 
-uint32_t shatter(Jelly *ctx, treenode_t tree) {
+struct shatter {
+        uint32_t refs;
+        uint32_t leaves;
+};
+
+struct shatter shatter(Jelly *ctx, treenode_t tree, bool top) {
         treenode_value val = ctx->treenodes[tree.ix];
 
         uint32_t refs = ctx->refcounts[tree.ix];
 
-        // Ignore leaves and already-fragmented values.
+        // Leaf or existing fragment.
         switch (NODEVAL_TAG(val)) {
             case 4:
             case 5:
             case 6:
             case 7:
-                return refs;
+                return (struct shatter){ .refs = refs, .leaves = 1 };
         }
 
         treenode_t head = NODEVAL_HEAD(val);
         treenode_t tail = NODEVAL_TAIL(val);
 
-        uint32_t head_refs = shatter(ctx, head);
-        uint32_t tail_refs = shatter(ctx, tail);
+        struct shatter hed = shatter(ctx, head, false);
+        struct shatter tel = shatter(ctx, tail, false);
 
-        if (head_refs > refs) fragment(ctx, head);
-        if (tail_refs > refs) fragment(ctx, tail);
+        if (hed.refs > refs) { frag(ctx, head, hed.leaves); hed.leaves = 1; }
+        if (tel.refs > refs) { frag(ctx, tail, tel.leaves); tel.leaves = 1; }
 
-        return refs;
+        uint32_t leaves = hed.leaves + tel.leaves;
+
+        if (top) frag(ctx, tree, leaves);
+
+        return (struct shatter){ .refs = refs, .leaves = leaves };
 }
 
 
@@ -893,6 +911,123 @@ treenode_t jelly_cons(Jelly *ctx, treenode_t hed, treenode_t tel) {
 }
 
 
+// Serializing /////////////////////////////////////////////////////////////////
+
+// 127        -> 0b01111111
+// 128        -> 0b10000001_10000000
+// 255        -> 0b10000001_11111111
+// 256        -> 0b10000001_00000000_00000001
+// UINT64_MAX -> 0b10001000_11111111_(x8)
+uint64_t word_dumpsize(uint64_t word) {
+        if (word < 128) return 1;
+        return 1 + word64_bytes(word);
+}
+
+// width=63  -> 0b10111111_xxxxxxxx(x63)
+// width=64  -> 0b11000001_01000000_xxxxxxxx*63
+// width=64  -> 0b11000001_01000000_xxxxxxxx*64
+// width=255 -> 0b11000001_11111111_xxxxxxxx*255
+// width=256 -> 0b11000010_00000000_000000001_xxxxxxxx(*256)
+uint64_t leaf_dumpsize(leaf_t leaf) {
+        if (leaf.width_bytes < 9) {
+                // printf("\tDIRECT (word=%lu)\n", (uint64_t) leaf.bytes);
+                return word_dumpsize((uint64_t) leaf.bytes);
+        }
+
+        // single-byte length field
+        if (leaf.width_bytes < 64) {
+                // printf("\tSHORT\n");
+                return 1 + leaf.width_bytes;
+        }
+
+        // variable-byte length field
+        // printf("\tLONG %d %u\n", leaf.width_bytes, word64_bytes(leaf.width_bytes));
+        return 1 + word64_bytes(leaf.width_bytes) + leaf.width_bytes;
+}
+
+void print_bar(Jelly*, bar_t);
+void print_nat(Jelly*, nat_t);
+void print_fragment_outline(Jelly*, frag_t);
+
+char *serialize(Jelly *ctx) {
+        uint64_t width = 0;
+        uint64_t refrs = 0;
+
+        uint32_t numpins = ctx->pins_count;
+        refrs += numpins;
+        width += word_dumpsize(numpins);
+        printf("buffer_bytes (after pin_width) = %lu\n", width);
+        width += numpins * sizeof(hash256_t);
+
+        printf("buffer_bytes (after pins) = %lu\n", width);
+
+        uint32_t numbars = ctx->bars_count;
+        refrs += numbars;
+        width += word_dumpsize(numbars);
+        printf("buffer_bytes (bar_width) = %lu\n", width);
+        for (int i=0; i<numbars; i++) {
+                width += leaf_dumpsize(ctx->bars[i]);
+                printf("buffer_bytes (after b%d) = %lu\n", i, width);
+                printf("\n\tb%d = ", i);
+                print_bar(ctx, (bar_t){ .ix = i });
+                printf("\n\n");
+        }
+
+        uint32_t numnats = ctx->nats_count;
+        refrs += numnats;
+        width += word_dumpsize(numnats);
+        printf("buffer_bytes (after nats count) = %lu\n", width);
+        for (int i=0; i<ctx->nats_count; i++) {
+                width += leaf_dumpsize(ctx->nats[i]);
+                printf("buffer_bytes (after n%d) = %lu\n", i, width);
+                printf("\n\tn%d = ", i);
+                print_nat(ctx, (nat_t){ .ix = i });
+                printf("\n\n");
+        }
+
+        uint32_t numfrags = ctx->frags_count;
+        width += word_dumpsize(ctx->frags_count);
+        printf("buffer_bytes (after frags count) = %lu\n", width);
+
+        uint64_t treebits = 0;
+
+        for (int i=0; i<numfrags;  i++) {
+                uint32_t maxref     = refrs - 1;
+                uint32_t leaf_width = word64_bits(maxref);
+                uint32_t leaves     = ctx->frags[i].leaves;
+                uint32_t frag_bits  = (leaves*leaf_width) + (leaves * 2) - 1;
+
+                treebits += frag_bits;
+                refrs++;
+
+                printf("tree_bits (frags) = %lu\n", treebits);
+                printf("\n\t[maxref=%u leafwid=%u leaves=%u bits=%u]\n", maxref, leaf_width, leaves, frag_bits);
+                printf("\n\t\tf%d = ", i);
+                print_fragment_outline(ctx, (frag_t){i});
+                printf("\n\n");
+        }
+
+        // Tree-bits is padded to be a multiple of 8 (treat as a byte-array);
+        uint64_t hanging_bits = treebits % 8;
+        if (hanging_bits) treebits += (8 - hanging_bits);
+
+        // Add in the tree bits;
+        width += (treebits/8);
+
+        printf("buffer_bytes (unpadded) = %lu\n", width);
+
+        // Result is always a multiple of 8 (so we can treat it as an
+        // array of 64-bit words);
+        uint64_t hanging_bytes = width % 8;
+        if (hanging_bytes) width += (8 - hanging_bytes);
+
+        printf("buffer_bytes = %lu\n", width);
+
+        return calloc(1, width);
+}
+
+
+
 // Testing /////////////////////////////////////////////////////////////////////
 
 uint8_t hex_value(char a, char b) {
@@ -1019,17 +1154,20 @@ leaf_t read_string() {
         leaf_t leaf;
         leaf.width_bytes = count;
 
-        // printf("\tread_string() -> \"%s\" (%lu)\n", buf, count);
-        printf("read_string()\n");
+        printf("\tread_string() -> \"%s\" (%lu)\n", buf, count);
+        // printf("read_string()\n");
 
 
         if (count < 9) {
                 leaf.bytes = (uint8_t*) pack_bytes_lsb(count, buf);
+                printf("\t\t(direct)\n");
         } else {
                 leaf.bytes = calloc(count+1, 1);
                 memcpy(leaf.bytes, buf, count);
+                printf("\t\t(indirect)\n");
         }
 
+        printf("\t\t(width=%d)\n", leaf.width_bytes);
         free(buf);
         return leaf;
 
@@ -1457,17 +1595,17 @@ void jelly_debug(Jelly *ctx) {
 int main () {
         Jelly *ctx = new_jelly_ctx();
 
-        //hash256_t dumb_hash_1 = { fmix64(111111), fmix64(65535), fmix64(9),  65536 };
-        //hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
+        hash256_t dumb_hash_1 = { fmix64(111111), fmix64(65535), fmix64(9),  65536 };
+        hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
         treenode_t top = read_some(ctx);
-        // treenode_t tmp = jelly_pin(ctx, &dumb_hash_1);
-        // top = jelly_cons(ctx, tmp, top);
-        // tmp = jelly_pin(ctx, &dumb_hash_1);
-        // top = jelly_cons(ctx, tmp, top);
-        // tmp = jelly_pin(ctx, &dumb_hash_2);
-        // top = jelly_cons(ctx, tmp, top);
+        treenode_t tmp = jelly_pin(ctx, &dumb_hash_1);
+        top = jelly_cons(ctx, tmp, top);
+        tmp = jelly_pin(ctx, &dumb_hash_1);
+        top = jelly_cons(ctx, tmp, top);
+        tmp = jelly_pin(ctx, &dumb_hash_2);
+        top = jelly_cons(ctx, tmp, top);
 
-        shatter(ctx, top);
+        shatter(ctx, top, true);
 
         int wid = jelly_buffer_size(ctx);
 
@@ -1475,16 +1613,15 @@ int main () {
 
         jelly_debug(ctx);
 
-        printf("\n\nFull Outline:\n\n\t");
-        print_tree_outline(ctx, top);
-
-        printf("\n\nFull Tree:\n\n\t");
-        print_tree(ctx, top);
-
         jelly_dump(ctx, buf);
         fwrite(buf, 1, wid, stdout);
+
+        char *buf2 = serialize(ctx);
+
+        free(buf2);
         free_jelly_ctx(ctx);
         free(buf);
+
 
         return 0;
 }
