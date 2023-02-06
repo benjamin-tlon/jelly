@@ -1020,6 +1020,170 @@ void showbits(char *key, int wid, int num, uint64_t bits) {
         if (!key) putchar(')');
 }
 
+struct frag_state {
+        uint8_t acc;
+        uint8_t fil;
+        treenode_t *stack;
+        uint8_t offs[4];
+        uint64_t refbits;
+        uint8_t *out;
+};
+
+void serialize_frag(Jelly *ctx, struct frag_state *st, FragVal frag) {
+        treenode_t *stack = st->stack;
+        uint8_t fil       = st->fil;
+        uint8_t acc       = st->acc;
+        uint8_t *offs     = st->offs;
+        uint64_t refbits  = st->refbits;
+        uint8_t *out      = st->out;
+
+        int sp = 0;
+
+        stack[sp++] = frag.tail;
+        stack[sp]   = frag.head;
+
+        int parens = 1;
+
+        while (sp >= 0) {
+
+                treenode_t t = stack[sp];
+
+                treenode_value val = ctx->treenodes[t.ix];
+
+                if (val.word >> 63) {
+                        printf("\n");
+                        for (int x=0; x<sp; x++) putchar(' ');
+                        print_tree_outline(ctx, t);
+                        //printf("\n");
+
+                        printf("\n\t\t\t\t");
+                        showbits(NULL, 8, fil, acc);
+
+                        // Output a zero bit
+                        fil = (fil + 1) % 8;
+                        if (!fil) { showbits("flush", 8, 8, acc); *out++ = acc; acc = 0; }
+
+                        showbits("tag", 8, fil, acc);
+
+                        uint8_t ptr = (uint8_t) val.word;
+                        uint64_t tag = ((val.word << 1) >> 62);
+                        uint32_t bits = ptr + offs[tag];
+
+                        uint8_t new_bits = (bits << fil);
+                        uint8_t overflow = (bits >> (8 - fil));
+
+                        // printf(" [extra=%u]", extra);
+                        showbits("v", refbits, refbits, bits);
+
+                        // int new_count = ((fil+refbits)>8) ? 8 : (fil + refbits);
+                        // int ovo_count = ((fil+refbits)>8) ? (8 - (fil + refbits)) : 0;
+                        // showbits("mask", 8, new_count, new_bits);
+
+                        acc |= new_bits;
+                        fil += refbits;
+
+                        if (fil >= 8) {
+                                showbits("overflow", (fil-8), (fil-8), overflow);
+                                showbits("flush", 8, 8, acc);
+                                *out++ = acc;
+                                acc = overflow;
+                                fil -= 8;
+                        }
+
+                        showbits(NULL, 8, fil, acc);
+
+                        printf("\n");
+                        sp--;
+                } else {
+                        printf("\n");
+                        for (int x=0; x<sp; x++) putchar(' ');
+                        printf("-");
+                        parens++;
+
+                        printf("\n\t\t\t\t");
+                        showbits(NULL, 8, fil, acc);
+
+                        // Output a 1 bit.
+                        acc |= (1 << fil);
+                        showbits("tag", 8, (fil+1), acc);
+                        fil = (fil + 1) % 8;
+                        if (!fil) { showbits("flush", 8, 8, acc); *out++ = acc; acc = 0; }
+
+                        showbits(NULL, 8, fil, acc);
+
+                        // Replaces the current stack pointer.
+                        stack[sp++] = NODEVAL_TAIL(val);
+                        stack[sp]   = NODEVAL_HEAD(val);
+                }
+        }
+
+        st->fil = fil;
+        st->acc = acc;
+        st->out = out;
+}
+
+/*
+struct frag_state {
+        uint8_t acc;
+        uint8_t fil;
+        treenode_t *stack;
+        uint8_t offs[4];
+        uint64_t refbits;
+        uint8_t *out;
+};
+
+void serialize_frag(Jelly *ctx, struct frag_state *st, FragVal frag) {
+        treenode_t *stack = st->stack;
+        uint8_t fil       = st->fil;
+        uint8_t acc       = st->acc;
+        uint8_t *offs     = st->offs;
+        uint64_t refbits  = st->refbits;
+        uint8_t *out      = st->out;
+
+        int sp = 0;
+
+        stack[sp++] = frag.tail;
+        stack[sp]   = frag.head;
+
+        while (sp >= 0) {
+                treenode_value val = ctx->treenodes[stack[sp].ix];
+
+                if (val.word >> 63) {
+                        // Output a zero bit
+                        fil = (fil + 1) % 8;
+                        if (!fil) { *out++ = acc; acc = 0; }
+
+                        uint64_t tag = ((val.word << 1) >> 62);
+                        uint32_t bits = ((uint8_t)val.word) + offs[tag];
+
+                        acc |= (bits << fil)
+                        fil += refbits;
+
+                        if (fil >= 8) {
+                                *out++ = acc;
+                                acc = bits >> (8 - fil);
+                                fil -= 8;
+                        }
+
+                        sp--;
+                } else {
+                        // Output a 1 bit.
+                        acc |= (1 << fil);
+                        fil = (fil + 1) % 8;
+                        if (!fil) { *out++ = acc; acc = 0; }
+
+                        // Tail replaces current node, head goes on top.
+                        stack[sp++] = NODEVAL_TAIL(val);
+                        stack[sp]   = NODEVAL_HEAD(val);
+                }
+        }
+
+        st->fil = fil;
+        st->acc = acc;
+        st->out = out;
+}
+*/
+
 struct ser serialize(Jelly *ctx) {
         uint64_t width = 0;
         uint64_t refrs = 0;
@@ -1029,74 +1193,65 @@ struct ser serialize(Jelly *ctx) {
         uint32_t numnats  = ctx->nats_count;
         uint32_t numfrags = ctx->frags_count;
 
-        {
-                refrs += numpins;
-                width += word_dumpsize(numpins);
-                printf("buffer_bytes (after pin_width) = %lu\n", width);
-                width += numpins * sizeof(hash256_t);
+        refrs += numpins;
+        width += word_dumpsize(numpins);
+        printf("buffer_bytes (after pin_width) = %lu\n", width);
+        width += numpins * sizeof(hash256_t);
+        printf("buffer_bytes (after pins) = %lu\n", width);
 
-                printf("buffer_bytes (after pins) = %lu\n", width);
+        refrs += numbars;
+        width += word_dumpsize(numbars);
+        printf("buffer_bytes (bar_width) = %lu\n", width);
+        for (int i=0; i<numbars; i++) {
+                width += leaf_dumpsize(ctx->bars[i]);
+                printf("buffer_bytes (after b%d) = %lu\n", i, width);
+                printf("\n\tb%d = ", i);
+                print_bar(ctx, (bar_t){ .ix = i });
+                printf("\n\n");
         }
 
-        {
-                refrs += numbars;
-                width += word_dumpsize(numbars);
-                printf("buffer_bytes (bar_width) = %lu\n", width);
-                for (int i=0; i<numbars; i++) {
-                        width += leaf_dumpsize(ctx->bars[i]);
-                        printf("buffer_bytes (after b%d) = %lu\n", i, width);
-                        printf("\n\tb%d = ", i);
-                        print_bar(ctx, (bar_t){ .ix = i });
-                        printf("\n\n");
-                }
+        refrs += numnats;
+        width += word_dumpsize(numnats);
+        printf("buffer_bytes (after nats count) = %lu\n", width);
+        for (int i=0; i<numnats; i++) {
+                width += leaf_dumpsize(ctx->nats[i]);
+                printf("buffer_bytes (after n%d) = %lu\n", i, width);
+                printf("\n\tn%d = ", i);
+                print_nat(ctx, (nat_t){ .ix = i });
+                printf("\n\n");
         }
 
-        {
-                refrs += numnats;
-                width += word_dumpsize(numnats);
-                printf("buffer_bytes (after nats count) = %lu\n", width);
-                for (int i=0; i<numnats; i++) {
-                        width += leaf_dumpsize(ctx->nats[i]);
-                        printf("buffer_bytes (after n%d) = %lu\n", i, width);
-                        printf("\n\tn%d = ", i);
-                        print_nat(ctx, (nat_t){ .ix = i });
-                        printf("\n\n");
-                }
+        width += word_dumpsize(ctx->frags_count);
+        printf("buffer_bytes (after frags count) = %lu\n", width);
+
+        uint64_t treebits = 0;
+
+        for (int i=0; i<numfrags;  i++) {
+                uint32_t maxref     = refrs - 1;
+                uint32_t leaf_width = word64_bits(maxref);
+                uint32_t leaves     = ctx->frags[i].leaves;
+                uint32_t frag_bits  = (leaves*leaf_width) + (leaves * 2) - 2;
+                    // (... - 2) because we can omit the outermost
+                    // one bit.  Every fragment is a pair, so the
+                    // parser just reads two forms per fragment:
+                    // (head, tail).
+
+                treebits += frag_bits;
+                refrs++;
+
+                printf("tree_bits (frags) = %lu\n", treebits);
+                printf("\n\t[maxref=%u leafwid=%u leaves=%u bits=%u]\n", maxref, leaf_width, leaves, frag_bits);
+                printf("\n\t\tf%d = ", i);
+                print_fragment_outline(ctx, (frag_t){i});
+                printf("\n\n");
         }
 
-        {
-                width += word_dumpsize(ctx->frags_count);
-                printf("buffer_bytes (after frags count) = %lu\n", width);
+        // Tree-bits is padded to be a multiple of 8 (treat as a byte-array);
+        uint64_t hanging_bits = treebits % 8;
+        if (hanging_bits) treebits += (8 - hanging_bits);
 
-                uint64_t treebits = 0;
-
-                for (int i=0; i<numfrags;  i++) {
-                        uint32_t maxref     = refrs - 1;
-                        uint32_t leaf_width = word64_bits(maxref);
-                        uint32_t leaves     = ctx->frags[i].leaves;
-                        uint32_t frag_bits  = (leaves*leaf_width) + (leaves * 2) - 2;
-                            // (... - 2) because we can omit the outermost
-                            // one bit.  Every fragment is a pair, so the
-                            // parser just reads two forms per fragment:
-                            // (head, tail).
-
-                        treebits += frag_bits;
-                        refrs++;
-
-                        printf("tree_bits (frags) = %lu\n", treebits);
-                        printf("\n\t[maxref=%u leafwid=%u leaves=%u bits=%u]\n", maxref, leaf_width, leaves, frag_bits);
-                        printf("\n\t\tf%d = ", i);
-                        print_fragment_outline(ctx, (frag_t){i});
-                        printf("\n\n");
-                }
-
-                // Tree-bits is padded to be a multiple of 8 (treat as a byte-array);
-                uint64_t hanging_bits = treebits % 8;
-                if (hanging_bits) treebits += (8 - hanging_bits);
-
-                // Add in the tree bits;
-                width += (treebits/8);
-        }
+        // Add in the tree bits;
+        width += (treebits/8);
 
         printf("total_byte_width = %lu\n", width);
 
@@ -1117,137 +1272,70 @@ struct ser serialize(Jelly *ctx) {
 
         // Dumping Leaves
 
-        {
-                word_dump(&out, numpins);
-                for (int i=0; i<numpins; i++) {
-                        printf("p%d\n", i);
-                        hash256_t *pin = ctx->pins[i];
-                        memcpy(out, pin, 32);
-                        out += 32;
-                }
+        word_dump(&out, numpins);
+        for (int i=0; i<numpins; i++) {
+                printf("p%d\n", i);
+                hash256_t *pin = ctx->pins[i];
+                memcpy(out, pin, 32);
+                out += 32;
+        }
 
-                word_dump(&out, numbars);
-                for (int i=0; i<numbars; i++) {
-                        printf("b%d\n", i);
-                        leaf_dump(&out, ctx->bars[i]);
-                }
+        word_dump(&out, numbars);
+        for (int i=0; i<numbars; i++) {
+                printf("b%d\n", i);
+                leaf_dump(&out, ctx->bars[i]);
+        }
 
-                word_dump(&out, numnats);
-                for (int i=0; i<numnats; i++) {
-                        printf("n%d\n", i);
-                        leaf_dump(&out, ctx->nats[i]);
-                }
+        word_dump(&out, numnats);
+        for (int i=0; i<numnats; i++) {
+                printf("n%d\n", i);
+                leaf_dump(&out, ctx->nats[i]);
+        }
 
-                word_dump(&out, numfrags);
+        word_dump(&out, numfrags);
 
-                uint64_t maxdepth = 128; // TODO
-                uint8_t acc = 0;
-                uint8_t fil = 0;
+        uint64_t maxdepth = 128; // TODO
 
-                treenode_t stack[maxdepth];
+        uint8_t acc = 0;
+        uint8_t fil = 0;
+        treenode_t stack[maxdepth];
 
-                for (int i=0; i<numfrags; i++) {
-                        uint8_t pinoff   = 0;
-                        uint8_t baroff   = pinoff + numpins;
-                        uint8_t natoff   = baroff + numbars;
-                        uint8_t frgoff   = natoff + numnats;
-                        uint64_t maxref  = frgoff + i - 1;
-                        uint64_t refbits = word64_bits(maxref);
+        struct frag_state st;
+        st.acc = 0;
+        st.fil = 0;
+        st.stack = stack;
+        st.out = out;
 
-                        printf("\nFRAG(%d) [maxref=%lu refbits=%lu]\n\n", i, maxref, refbits);
+        for (int i=0; i<numfrags; i++) {
+                uint8_t pinoff   = 0;
+                uint8_t baroff   = pinoff + numpins;
+                uint8_t natoff   = baroff + numbars;
+                uint8_t frgoff   = natoff + numnats;
+                uint64_t maxref  = frgoff + i - 1;
+                uint64_t refbits = word64_bits(maxref);
 
-                        uint8_t offs[4] = {pinoff, baroff, natoff, frgoff};
+                printf("\nFRAG(%d) [maxref=%lu refbits=%lu]\n\n", i, maxref, refbits);
 
-                        int sp = 0;
-                        stack[sp++] = ctx->frags[i].tail;
-                        stack[sp]   = ctx->frags[i].head;
+                st.offs[0] = pinoff;
+                st.offs[1] = baroff;
+                st.offs[2] = natoff;
+                st.offs[3] = frgoff;
+                st.refbits = refbits;
 
-                        int parens = 1;
+                serialize_frag(ctx, &st, ctx->frags[i]);
+        }
 
-                        while (sp >= 0) {
+        out = st.out;
+        acc = st.acc;
+        fil = st.fil;
 
-                                treenode_t t = stack[sp];
-
-                                treenode_value val = ctx->treenodes[t.ix];
-
-                                if (val.word >> 63) {
-                                        printf("\n");
-                                        for (int x=0; x<sp; x++) putchar(' ');
-                                        print_tree_outline(ctx, t);
-                                        //printf("\n");
-
-                                        printf("\n\t\t\t\t");
-                                        showbits(NULL, 8, fil, acc);
-
-                                        // Output a zero bit
-                                        fil = (fil + 1) % 8;
-                                        if (!fil) { showbits("flush", 8, 8, acc); *out++ = acc; acc = 0; }
-
-                                        showbits("tag", 8, fil, acc);
-
-                                        uint8_t ptr = (uint8_t) val.word;
-                                        uint64_t tag = ((val.word << 1) >> 62);
-                                        uint32_t bits = ptr + offs[tag];
-
-                                        uint8_t new_bits = (bits << fil);
-                                        uint8_t overflow = (bits >> (8 - fil));
-
-                                        // printf(" [extra=%u]", extra);
-                                        showbits("v", refbits, refbits, bits);
-
-                                        // int new_count = ((fil+refbits)>8) ? 8 : (fil + refbits);
-                                        // int ovo_count = ((fil+refbits)>8) ? (8 - (fil + refbits)) : 0;
-                                        // showbits("mask", 8, new_count, new_bits);
-
-                                        acc |= new_bits;
-                                        fil += refbits;
-
-                                        if (fil >= 8) {
-                                                showbits("ovo", (fil-8), (fil-8), overflow);
-                                                showbits("flush", 8, 8, acc);
-                                                *out++ = acc;
-                                                acc = overflow;
-                                                fil -= 8;
-                                        }
-
-                                        showbits(NULL, 8, fil, acc);
-
-                                        printf("\n");
-                                        sp--;
-                                } else {
-                                        printf("\n");
-                                        for (int x=0; x<sp; x++) putchar(' ');
-                                        printf("-");
-                                        parens++;
-
-                                        printf("\n\t\t\t\t");
-                                        showbits(NULL, 8, fil, acc);
-
-                                        // Output a 1 bit.
-                                        acc |= (1 << fil);
-                                        showbits("tag", 8, (fil+1), acc);
-                                        fil = (fil + 1) % 8;
-                                        if (!fil) { showbits("flush", 8, 8, acc); *out++ = acc; acc = 0; }
-
-                                        showbits(NULL, 8, fil, acc);
-
-                                        // Replaces the current stack pointer.
-                                        stack[sp++] = NODEVAL_TAIL(val);
-                                        stack[sp]   = NODEVAL_HEAD(val);
-                                }
-                        }
-
-                }
-
-                if (fil > 0) {
-                        printf("\n");
-                        showbits("final_flush", 8, 8, acc);
-                        printf("\n\n");
-                        *out++ = acc;
-                        acc = 0;
-                        fil = 0;
-                }
-
+        if (fil > 0) {
+                printf("\n");
+                showbits("final_flush", 8, 8, acc);
+                printf("\n\n");
+                *out++ = acc;
+                acc = 0;
+                fil = 0;
         }
 
         // Dumping Tree Fragments (TODO)
