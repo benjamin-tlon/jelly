@@ -923,6 +923,25 @@ uint64_t word_dumpsize(uint64_t word) {
         return 1 + word64_bytes(word);
 }
 
+// TODO: Test test test
+uint8_t *word_dump(uint8_t *out, uint64_t word) {
+        if (word < 128) {
+                *out++ = (uint8_t) word;
+        } else {
+                uint8_t width = (uint8_t) word64_bytes(word);
+
+                *out++ = width;
+
+                // TODO Can I use memcpy here?
+                for (int i=0; i<width; i++) {
+                        *out++ = (uint8_t) word;
+                        word = word >> 8;
+                }
+        }
+
+        return out;
+}
+
 // width=63  -> 0b10111111_xxxxxxxx(x63)
 // width=64  -> 0b11000001_01000000_xxxxxxxx*63
 // width=64  -> 0b11000001_01000000_xxxxxxxx*64
@@ -945,81 +964,120 @@ uint64_t leaf_dumpsize(leaf_t leaf) {
         return 1 + word64_bytes(leaf.width_bytes) + leaf.width_bytes;
 }
 
+// TODO: Test test test
+uint8_t *leaf_dump(uint8_t *out, leaf_t leaf) {
+        uint64_t wid = leaf.width_bytes;
+
+        if (wid < 9) {
+                printf("\tdump direct\n");
+                return word_dump(out, (uint64_t) leaf.bytes);
+        }
+        if (wid < 64) {
+                printf("\tdump small\n");
+                *out++ = ((uint8_t) wid) | 127; // 0b10xxxxxx
+        } else {
+                printf("\tdump big\n");
+                uint8_t widwid = word64_bytes(wid);
+
+                *out++ = (widwid  | 192); // 0b11xxxxxx
+
+                // TODO Can I use memcpy here too?
+                uint64_t tmp = wid;
+                for (int i=0; i<widwid; i++) {
+                        *out++ = (uint8_t) tmp;
+                        tmp = tmp >> 8;
+                }
+        }
+
+        memcpy(out, leaf.bytes, wid);
+
+        return (out + wid);
+}
+
 void print_bar(Jelly*, bar_t);
 void print_nat(Jelly*, nat_t);
 void print_fragment_outline(Jelly*, frag_t);
 
-struct serialize {
+struct ser {
         char *buf;
         size_t wid;
 };
 
-struct serialize serialize(Jelly *ctx) {
+struct ser serialize(Jelly *ctx) {
         uint64_t width = 0;
         uint64_t refrs = 0;
 
-        uint32_t numpins = ctx->pins_count;
-        refrs += numpins;
-        width += word_dumpsize(numpins);
-        printf("buffer_bytes (after pin_width) = %lu\n", width);
-        width += numpins * sizeof(hash256_t);
-
-        printf("buffer_bytes (after pins) = %lu\n", width);
-
-        uint32_t numbars = ctx->bars_count;
-        refrs += numbars;
-        width += word_dumpsize(numbars);
-        printf("buffer_bytes (bar_width) = %lu\n", width);
-        for (int i=0; i<numbars; i++) {
-                width += leaf_dumpsize(ctx->bars[i]);
-                printf("buffer_bytes (after b%d) = %lu\n", i, width);
-                printf("\n\tb%d = ", i);
-                print_bar(ctx, (bar_t){ .ix = i });
-                printf("\n\n");
-        }
-
-        uint32_t numnats = ctx->nats_count;
-        refrs += numnats;
-        width += word_dumpsize(numnats);
-        printf("buffer_bytes (after nats count) = %lu\n", width);
-        for (int i=0; i<ctx->nats_count; i++) {
-                width += leaf_dumpsize(ctx->nats[i]);
-                printf("buffer_bytes (after n%d) = %lu\n", i, width);
-                printf("\n\tn%d = ", i);
-                print_nat(ctx, (nat_t){ .ix = i });
-                printf("\n\n");
-        }
-
+        uint32_t numpins  = ctx->pins_count;
+        uint32_t numbars  = ctx->bars_count;
+        uint32_t numnats  = ctx->nats_count;
         uint32_t numfrags = ctx->frags_count;
-        width += word_dumpsize(ctx->frags_count);
-        printf("buffer_bytes (after frags count) = %lu\n", width);
 
-        uint64_t treebits = 0;
+        {
+                refrs += numpins;
+                width += word_dumpsize(numpins);
+                printf("buffer_bytes (after pin_width) = %lu\n", width);
+                width += numpins * sizeof(hash256_t);
 
-        for (int i=0; i<numfrags;  i++) {
-                uint32_t maxref     = refrs - 1;
-                uint32_t leaf_width = word64_bits(maxref);
-                uint32_t leaves     = ctx->frags[i].leaves;
-                uint32_t frag_bits  = (leaves*leaf_width) + (leaves * 2) - 1;
-
-                treebits += frag_bits;
-                refrs++;
-
-                printf("tree_bits (frags) = %lu\n", treebits);
-                printf("\n\t[maxref=%u leafwid=%u leaves=%u bits=%u]\n", maxref, leaf_width, leaves, frag_bits);
-                printf("\n\t\tf%d = ", i);
-                print_fragment_outline(ctx, (frag_t){i});
-                printf("\n\n");
+                printf("buffer_bytes (after pins) = %lu\n", width);
         }
 
-        // Tree-bits is padded to be a multiple of 8 (treat as a byte-array);
-        uint64_t hanging_bits = treebits % 8;
-        if (hanging_bits) treebits += (8 - hanging_bits);
+        {
+                refrs += numbars;
+                width += word_dumpsize(numbars);
+                printf("buffer_bytes (bar_width) = %lu\n", width);
+                for (int i=0; i<numbars; i++) {
+                        width += leaf_dumpsize(ctx->bars[i]);
+                        printf("buffer_bytes (after b%d) = %lu\n", i, width);
+                        printf("\n\tb%d = ", i);
+                        print_bar(ctx, (bar_t){ .ix = i });
+                        printf("\n\n");
+                }
+        }
 
-        // Add in the tree bits;
-        width += (treebits/8);
+        {
+                refrs += numnats;
+                width += word_dumpsize(numnats);
+                printf("buffer_bytes (after nats count) = %lu\n", width);
+                for (int i=0; i<numnats; i++) {
+                        width += leaf_dumpsize(ctx->nats[i]);
+                        printf("buffer_bytes (after n%d) = %lu\n", i, width);
+                        printf("\n\tn%d = ", i);
+                        print_nat(ctx, (nat_t){ .ix = i });
+                        printf("\n\n");
+                }
+        }
 
-        printf("buffer_bytes (unpadded) = %lu\n", width);
+        {
+                width += word_dumpsize(ctx->frags_count);
+                printf("buffer_bytes (after frags count) = %lu\n", width);
+
+                uint64_t treebits = 0;
+
+                for (int i=0; i<numfrags;  i++) {
+                        uint32_t maxref     = refrs - 1;
+                        uint32_t leaf_width = word64_bits(maxref);
+                        uint32_t leaves     = ctx->frags[i].leaves;
+                        uint32_t frag_bits  = (leaves*leaf_width) + (leaves * 2) - 1;
+
+                        treebits += frag_bits;
+                        refrs++;
+
+                        printf("tree_bits (frags) = %lu\n", treebits);
+                        printf("\n\t[maxref=%u leafwid=%u leaves=%u bits=%u]\n", maxref, leaf_width, leaves, frag_bits);
+                        printf("\n\t\tf%d = ", i);
+                        print_fragment_outline(ctx, (frag_t){i});
+                        printf("\n\n");
+                }
+
+                // Tree-bits is padded to be a multiple of 8 (treat as a byte-array);
+                uint64_t hanging_bits = treebits % 8;
+                if (hanging_bits) treebits += (8 - hanging_bits);
+
+                // Add in the tree bits;
+                width += (treebits/8);
+        }
+
+        printf("total_byte_width = %lu\n", width);
 
         size_t total_byte_width = width;
 
@@ -1028,9 +1086,43 @@ struct serialize serialize(Jelly *ctx) {
         uint64_t hanging_bytes = width % 8;
         if (hanging_bytes) width += (8 - hanging_bytes);
 
-        printf("buffer_bytes = %lu\n", width);
+        printf("padded byte width = %lu\n", width);
 
-        return (struct serialize) { .buf = calloc(1, width), .wid = total_byte_width };
+        struct ser result = (struct ser) { .buf = calloc(1, width), .wid = total_byte_width };
+
+        // Dumping
+
+        uint8_t *out = (uint8_t*) result.buf;
+
+        // Dumping Leaves
+
+        {
+                out = word_dump(out, numpins);
+                for (int i=0; i<numpins; i++) {
+                        printf("p%d\n", i);
+                        hash256_t *pin = ctx->pins[i];
+                        memcpy(out, pin, 32);
+                        out += 32;
+                }
+
+                out = word_dump(out, numbars);
+                for (int i=0; i<numbars; i++) {
+                        printf("b%d\n", i);
+                        out = leaf_dump(out, ctx->bars[i]);
+                }
+
+                out = word_dump(out, numnats);
+                for (int i=0; i<numnats; i++) {
+                        printf("n%d\n", i);
+                        out = leaf_dump(out, ctx->nats[i]);
+                }
+
+                out = word_dump(out, numfrags);
+        }
+
+        // Dumping Tree Fragments (TODO)
+
+        return result;
 }
 
 
@@ -1608,7 +1700,7 @@ int main () {
 
         jelly_debug(ctx);
 
-        struct serialize ser = serialize(ctx);
+        struct ser ser = serialize(ctx);
 
         // fwrite(ser.buf, 1, ser.wid, stdout);
 
