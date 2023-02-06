@@ -31,11 +31,8 @@ static FORCE_INLINE uint64_t fmix64 (uint64_t k) {
         k *= BIG_CONSTANT(0xc4ceb9fe1a85ec53);
         k ^= k >> 33;
 
-        k += !k; // Never return 0
-
         return k;
 }
-
 
 /*
         Taken from stack overflow, derivative of boost::hash_combine,
@@ -60,8 +57,7 @@ size_t hash_combine(uint64_t x, uint64_t y) {
         TODO: This should return 0 for 0, but it seems to return 1.
 */
 uint32_t word64_bytes (uint64_t w) {
-        uint32_t zeros = __builtin_clzll(w);
-        uint32_t bits  = 64 - zeros;
+        uint32_t bits  = 64 - __builtin_clzll(w);
         return (bits/8) + !!(bits%8);
 }
 
@@ -273,17 +269,18 @@ Jelly *new_jelly_ctx () {
         res->nats_count = 0;
 
         // Deduplication table for leaves
-        res->leaves_table       = calloc((1<<2), sizeof(res->leaves_table[0]));
+        size_t leaves_table_bytes = (1<<2) * sizeof(res->leaves_table[0]);
+        res->leaves_table       = malloc(leaves_table_bytes);
         res->leaves_table_width = (1<<2);
         res->leaves_table_count = 0;
+        memset(res->leaves_table, 255, leaves_table_bytes);
 
         // Deduplication table for interior nodes
-        size_t nodes_table_byte_width = (1<<2) * sizeof(res->nodes_table[0]);
-        res->nodes_table       = malloc(nodes_table_byte_width);
+        size_t nodes_table_bytes = (1<<2) * sizeof(res->nodes_table[0]);
+        res->nodes_table       = malloc(nodes_table_bytes);
         res->nodes_table_width = (1<<2);
         res->nodes_table_count = 0;
-
-        memset(res->nodes_table, 255, nodes_table_byte_width);
+        memset(res->nodes_table, 255, nodes_table_bytes);
 
         // Array of duplicate tree-nodes (and the top-level node).  Each one
         // is an index into `treenodes`.
@@ -378,7 +375,7 @@ void rehash_nodes_if_full(Jelly *ctx) {
 
         uint32_t newwid = oldwid*2;
 
-        printf("\t\tREHASH (old=%u new=%u)\n", oldwid, newwid);
+        printf("\t\tREHASH_NODES (old=%u new=%u)\n", oldwid, newwid);
 
         // printf("OLD TABLE:\n");
         // jelly_debug_interior_nodes(ctx);
@@ -436,14 +433,16 @@ void rehash_leaves_if_full(Jelly *ctx) {
 
         uint32_t newwid = oldwid*2;
 
-        printf("\t\tREHASH (old=%u new=%u)\n", oldwid, newwid);
+        printf("\t\tREHASH_LEAVES (old=%u new=%u)\n", oldwid, newwid);
 
         // printf("OLD TABLE:\n");
         // jelly_debug_leaves(ctx, false);
         // printf("\n");
 
         leaves_table_entry_t *oldtab = ctx->leaves_table;
-        leaves_table_entry_t *newtab = calloc(newwid, sizeof(*newtab));
+        leaves_table_entry_t *newtab = malloc(newwid * sizeof(*newtab));
+
+        memset(newtab, 255, newwid * sizeof(*newtab));
 
         uint64_t newmask = newwid - 1;
 
@@ -456,20 +455,20 @@ void rehash_leaves_if_full(Jelly *ctx) {
         for (uint64_t i=0; i<oldwid; i++) {
                 leaves_table_entry_t ent = oldtab[i];
 
+                // empty slot
+                if (ent.pointer.ix == UINT32_MAX) continue;
+
                 uint64_t j = ent.hash;
-
-                if (j == 0) continue; // empty slot
-
                 for (;; j++) {
                         j &= newmask;
                         leaves_table_entry_t *tar = newtab + j;
-                        if (tar->hash == 0) {
+                        if (tar->pointer.ix == UINT32_MAX) {
                                 *tar = ent;
-                                // printf("\t\t%lu -> %lu\n", i, j);
+                                printf("\t\t%lu -> %lu\n", i, j);
                                 break;
-                        } // else {
-                                // printf("\t\t\t(%lu -> %lu) is taken\n", i, j);
-                        // }
+                        } else {
+                                printf("\t\t\t(%lu -> %lu) is taken\n", i, j);
+                        }
                 }
         }
 
@@ -496,10 +495,6 @@ treenode_t insert_packed_leaf(Jelly *ctx, PackedInsertRequest req) {
             req.word
         );
 
-        if (req.hash == 0) {
-                die("Broken invariant: hashes must be non-zero\n");
-        }
-
         /*
                 Do a linear-search over the leaves table, and use the
                 index of the corresponding nat, if we find one.
@@ -521,7 +516,7 @@ treenode_t insert_packed_leaf(Jelly *ctx, PackedInsertRequest req) {
 
                 ent = &(ctx->leaves_table[ix]);
 
-                if (ent->hash == 0) break;
+                if (ent->pointer.ix == UINT32_MAX) break;
 
                 bool match = ent->hash == req.hash &&
                              ent->width.word == req.width.word &&
@@ -575,10 +570,6 @@ void print_nat_leaf(Jelly*, leaf_t);
 treenode_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
         printf("\tinsert_indirect_leaf(wid=%u)\n", req.leaf.width_bytes);
 
-        if (req.hash == 0) {
-                die("Broken invariant: hashes must be non-zero\n");
-        }
-
         /*
                 Do a linear-search over the leaves table, and return the
                 index of the corresponding nat, if we find one.
@@ -593,18 +584,22 @@ treenode_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
         uint64_t mask = ctx->leaves_table_width - 1;
         uint64_t ix = req.hash;
 
+        int32_t byt_wid = req.leaf.width_bytes;
+        uint8_t *byt    = req.leaf.bytes;
+
         for (;; ix++) {
                 ix &= mask;
 
                 ent = &(ctx->leaves_table[ix]);
 
-                if (ent->hash == 0) break;
+                // An empty slot ends the search.
+                if (ent->pointer.ix == UINT32_MAX) break;
 
-                bool hit = (ent->hash == req.hash) && (ent->width.word == req.width.word);
-                if (!hit) continue;
+                if (ent->hash != req.hash) continue;
 
-                int o = memcmp(ent->bytes, req.leaf.bytes, req.leaf.width_bytes);
-                if (o != 0) continue;
+                if (ent->width.word != req.width.word) continue;
+
+                if (0 != memcmp(ent->bytes, byt, byt_wid)) continue;
 
                 printf("\t\tINDIRECT_LEAF_MATCH:\n\t\t\t");
                 ctx->refcounts[ent->pointer.ix]++;
@@ -743,7 +738,6 @@ treenode_t jelly_nat(Jelly *ctx, leaf_t leaf) {
                 return jelly_packed_nat(ctx, leaf.width_bytes, (uint64_t)leaf.bytes);
         } else {
                 uint64_t hash = XXH3_64bits(leaf.bytes, leaf.width_bytes);
-                hash += !hash;
 
                 return insert_indirect_leaf(ctx,
                     (IndirectInsertRequest){
@@ -799,7 +793,6 @@ treenode_t jelly_bar(Jelly *ctx, leaf_t leaf) {
                 );
         } else {
                 uint64_t hash = XXH3_64bits(leaf.bytes, leaf.width_bytes);
-                hash += !hash;
 
                 return insert_indirect_leaf(ctx,
                     (IndirectInsertRequest){
@@ -839,7 +832,6 @@ treenode_t jelly_pin(Jelly *ctx, hash256_t *pin) {
         printf("\tjelly_pin(hash=%lx)\n", pin->a);
 
         uint64_t hash = pin->a;
-        hash += !hash;
 
         return insert_indirect_leaf(ctx,
             (IndirectInsertRequest){
@@ -890,7 +882,7 @@ treenode_t jelly_cons(Jelly *ctx, treenode_t hed, treenode_t tel) {
                         treenode_t pointer = alloc_treenode(ctx, val);
 
                         cur->val     = val;
-                        cur->hash    = (uint32_t) hash;
+                        cur->hash    = hash;
                         cur->pointer = pointer;
 
                         ctx->nodes_table_count++;
@@ -1323,7 +1315,7 @@ void jelly_debug_leaves(Jelly *ctx, bool details) {
                 leaves_table_entry_t ent = ctx->leaves_table[i];
 
                 // Empty slot
-                if (ent.hash == 0) continue;
+                if (ent.pointer.ix == UINT32_MAX) continue;
 
                 printf("\t\t%4d = ", i);
                 print_tree_outline(ctx, ent.pointer);

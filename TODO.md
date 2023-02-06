@@ -10,24 +10,6 @@
     -   TODO Use the maximum_depth field to pre-allocate a stack during
         bit-serialization, don't use recursion.
 
--   DONE Internior nodes table.
--   DONE treenode_equals
--   DONE Interior node deduplication
-
--   TODO Printer shows backreferenes table.
-
--   TODO Fan backrefs.
-
-    Whenever we find a backreference:
-
-    -   Append a new new `treenode_value` into the backreferences table.
-
-        -   (Make sure that the printer can follow the chain of references
-            between the two tables).
-
-    -   Overwrite the `treenode_t` that was found, with a new
-        backreference (f5).
-
 -   TODO Calculate resulting buffer size.
 
     -   The logic for this exists already, I think as a comment in the
@@ -51,21 +33,6 @@
 ## Misc
 
 -   TODO Parser support for pins.
-
--   TODO Make sure no entity hash is ever zero.
-
-    -   TODO Is there some other field we could look at?
-
-        -   `uint64_t hash`: We can artificially force this to be non-zero.
-
-        -   `tagged_width_t width`: Zero values have zero width.
-
-        -   `uint8_t *bytes`: Zero values correspond to a NULL value here.
-
-        -   `treenode_t pointer`: The first treenode always has value zero.
-
-        How about (pointer.ix == UINT32_MAX)?  And then we can memset
-        like we do with the other table.
 
 -   TODO The front-end should own all the binary data for bars, bignats,
     and pins.  It shouldn't be freed with the Jelly* context, and instead
