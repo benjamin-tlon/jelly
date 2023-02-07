@@ -298,6 +298,27 @@ Jelly *new_jelly_ctx () {
         return res;
 }
 
+/*
+        We don't free ny memory or shrink any tables, we just set the
+        size-counts of everything to 0 and empty all the hashtable slots.
+*/
+void wipe_jelly_ctx (Jelly *ctx) {
+        ctx->treenodes_count = 0;
+        ctx->pins_count = 0;
+        ctx->bars_count = 0;
+        ctx->nats_count = 0;
+        ctx->frags_count = 0;
+
+        ctx->leaves_table_count = 0;
+        ctx->nodes_table_count = 0;
+
+        memset(ctx->leaves_table, 255,
+               (sizeof(ctx->leaves_table[0]) * ctx->leaves_table_width));
+
+        memset(ctx->nodes_table, 255,
+               (sizeof(ctx->nodes_table[0]) * ctx->nodes_table_width));
+}
+
 void free_jelly_ctx (Jelly *ctx) {
         free(ctx->treenodes);
         free(ctx->refcounts);
@@ -931,11 +952,18 @@ void word_dump(uint8_t **ptr, uint64_t word) {
         } else {
                 uint8_t width = (uint8_t) word64_bytes(word);
 
-                *buf++ = width;
+                uint8_t tagged_width = width | (2<<6); // 0b10xxxxxx
+
+                printf("\tword_dump: width = %u\n", width);
+                printf("\tword_dump: tagged_width = %u\n", tagged_width);
+
+                *buf++ = tagged_width;
 
                 // TODO Can I use memcpy here?
                 for (int i=0; i<width; i++) {
-                        *buf++ = (uint8_t) word;
+                        uint8_t byte = word;
+                        printf("\tword_dump: byte[%d] = %u (rest=%lu)\n", i, byte, word);
+                        *buf++ = byte;
                         word = word >> 8;
                 }
         }
@@ -966,24 +994,31 @@ uint64_t leaf_dumpsize(leaf_t leaf) {
 }
 
 // TODO: Test test test
-void leaf_dump(uint8_t **ptr, leaf_t leaf) {
-        uint8_t *buf = *ptr;
-
+uint8_t *dump_leaf(uint8_t *buf, leaf_t leaf) {
         uint64_t wid = leaf.width_bytes;
 
         if (wid < 9) {
                 printf("\tdump direct\n");
                 word_dump(&buf, (uint64_t) leaf.bytes);
-                return;
+                return buf;
         }
+
         if (wid < 64) {
-                printf("\tdump small\n");
-                *buf++ = ((uint8_t) wid) | 127; // 0b10xxxxxx
-        } else {
+                printf("\tdump small [wid=%lu]\n", wid);
+                uint8_t wid_byte = wid;
+                uint8_t wid_tagged = (wid_byte | 128); // 0b10xxxxxx
+                printf("\t\twidth_tagged = %u\n", wid_tagged);
+                *buf++ = wid_tagged;
+                memcpy(buf, leaf.bytes, wid);
+                buf += wid;
+                return buf;
+        }
+
+        {
                 printf("\tdump big\n");
                 uint8_t widwid = word64_bytes(wid);
 
-                *buf++ = (widwid  | 192); // 0b11xxxxxx
+                *buf++ = (widwid | 192); // 0b11xxxxxx
 
                 // TODO Can I use memcpy here too?
                 uint64_t tmp = wid;
@@ -991,11 +1026,11 @@ void leaf_dump(uint8_t **ptr, leaf_t leaf) {
                         *buf++ = (uint8_t) tmp;
                         tmp = tmp >> 8;
                 }
+
+                memcpy(buf, leaf.bytes, wid);
+                buf += wid;
+                return buf;
         }
-
-        memcpy(buf, leaf.bytes, wid);
-
-        *ptr = buf + wid;
 }
 
 void print_bar(Jelly*, bar_t);
@@ -1122,68 +1157,6 @@ void serialize_frag(Jelly *ctx, struct frag_state *st, FragVal frag) {
         st->out = out;
 }
 
-/*
-struct frag_state {
-        uint8_t acc;
-        uint8_t fil;
-        treenode_t *stack;
-        uint8_t offs[4];
-        uint64_t refbits;
-        uint8_t *out;
-};
-
-void serialize_frag(Jelly *ctx, struct frag_state *st, FragVal frag) {
-        treenode_t *stack = st->stack;
-        uint8_t fil       = st->fil;
-        uint8_t acc       = st->acc;
-        uint8_t *offs     = st->offs;
-        uint64_t refbits  = st->refbits;
-        uint8_t *out      = st->out;
-
-        int sp = 0;
-
-        stack[sp++] = frag.tail;
-        stack[sp]   = frag.head;
-
-        while (sp >= 0) {
-                treenode_value val = ctx->treenodes[stack[sp].ix];
-
-                if (val.word >> 63) {
-                        // Output a zero bit
-                        fil = (fil + 1) % 8;
-                        if (!fil) { *out++ = acc; acc = 0; }
-
-                        uint64_t tag = ((val.word << 1) >> 62);
-                        uint32_t bits = ((uint8_t)val.word) + offs[tag];
-
-                        acc |= (bits << fil)
-                        fil += refbits;
-
-                        if (fil >= 8) {
-                                *out++ = acc;
-                                acc = bits >> (8 - fil);
-                                fil -= 8;
-                        }
-
-                        sp--;
-                } else {
-                        // Output a 1 bit.
-                        acc |= (1 << fil);
-                        fil = (fil + 1) % 8;
-                        if (!fil) { *out++ = acc; acc = 0; }
-
-                        // Tail replaces current node, head goes on top.
-                        stack[sp++] = NODEVAL_TAIL(val);
-                        stack[sp]   = NODEVAL_HEAD(val);
-                }
-        }
-
-        st->fil = fil;
-        st->acc = acc;
-        st->out = out;
-}
-*/
-
 struct ser serialize(Jelly *ctx) {
         uint64_t width = 0;
         uint64_t refrs = 0;
@@ -1283,13 +1256,13 @@ struct ser serialize(Jelly *ctx) {
         word_dump(&out, numbars);
         for (int i=0; i<numbars; i++) {
                 printf("b%d\n", i);
-                leaf_dump(&out, ctx->bars[i]);
+                out = dump_leaf(out, ctx->bars[i]);
         }
 
         word_dump(&out, numnats);
         for (int i=0; i<numnats; i++) {
                 printf("n%d\n", i);
-                leaf_dump(&out, ctx->nats[i]);
+                out = dump_leaf(out, ctx->nats[i]);
         }
 
         word_dump(&out, numfrags);
@@ -1341,6 +1314,186 @@ struct ser serialize(Jelly *ctx) {
         // Dumping Tree Fragments (TODO)
 
         return result;
+}
+
+
+FORCE_INLINE uint8_t load_byte(struct ser *st) {
+    printf("\tload_byte() [remain=%lu]\n", st->wid);
+
+    // printf("\t    [");
+    // for (int i=0; i<10; i++) printf("%u%s", (uint8_t) st->buf[i], (i==9 ? "" : " "));
+    // printf("]\n");
+
+    if (st->wid == 0) die("load_byte(): EOF");
+    uint8_t byte = *(st->buf++);
+    st->wid--;
+    printf("\t  -> %u [remain=%lu]\n", byte, st->wid);
+    return byte;
+}
+
+uint64_t load_word(struct ser *st) {
+    uint8_t byt = load_byte(st);
+
+    if (byt < 128) {
+            return (uint64_t) byt;
+    }
+
+    uint8_t flag = byt & (1<<6);
+    uint8_t len = byt & ((1<<6)-1);
+
+    if (flag || len > 8) {
+            die("load_word(): length-byte is too big");
+    }
+
+    if (st->wid < len) {
+            die("load_word(): EOF after length byte");
+    }
+
+    uint64_t result = 0;
+
+    for (int i=0; i<len; i++) {
+            uint64_t new = *(st->buf++);
+            result |= (new << (8*i));
+    }
+
+    st->wid -= len;
+
+    return result;
+}
+
+FORCE_INLINE leaf_t load_leaf(struct ser *st) {
+        printf("load_leaf:\n");
+
+        leaf_t result;
+
+        uint8_t byt = load_byte(st);
+
+        if (byt < 128) {
+                printf("\tSingle-byte leaf: %u\n", byt);
+                uint64_t word = byt;
+                return (leaf_t) {
+                        .width_bytes = (word == 0 ? 0 : 1),
+                        .bytes       = (uint8_t*) word,
+                };
+        }
+
+        uint8_t flag = byt & (1<<6);
+        uint8_t len = byt & ((1<<6)-1);
+
+        printf("\tflag=%u len=%u\n", flag, len);
+
+        if (st->wid < len) {
+                die("load_word(): EOF after length byte");
+        }
+
+        // Packed Leaf
+        if (!flag && len < 9) {
+
+                printf("\tpacked\n");
+
+                uint64_t word = 0;
+
+                for (int i=0; i<len; i++) {
+                        uint8_t new_byte = *(st->buf++);
+                        uint64_t new = new_byte;
+                        printf("\t\tword = %lu, new= %lu\n", word, new);
+                        word |= (new << (8*i));
+                }
+
+                printf("\t\tword = %lu\n", word);
+
+                st->wid -= len;
+
+                result.bytes = (uint8_t*) word;
+                result.width_bytes = len;
+                return result;
+        }
+
+        // Short indirect leaf, byte indicates length.
+        if (!flag) {
+                printf("\tshort indirect\n");
+                result.bytes = (uint8_t*) st->buf;
+                result.width_bytes = len;
+
+                st->wid -= len;
+                st->buf += len;
+
+                return result;
+        }
+
+        printf("\tlong indirect\n");
+
+        if (len > 8) die("impossibly big length-of-length\n");
+
+        uint64_t actual_length = 0;
+
+        for (int i=0; i<len; i++) {
+                uint64_t new = *(st->buf++);
+                actual_length |= (new << (8*i));
+        }
+        st->wid -= len;
+
+        if (st->wid < actual_length) {
+                die("load_word(): EOF after variable-width length\n");
+        }
+
+        result.bytes = (uint8_t*) st->buf;
+        result.width_bytes = actual_length;
+
+        st->wid -= actual_length;
+        st->buf += actual_length;
+
+        return result;
+}
+
+/*
+        Note that for pins, indirect atoms, and indirect bars we do not
+        copy, we just slice the input buffer.
+*/
+void deserialize(Jelly *ctx, struct ser st) {
+        printf("\n");
+
+        uint64_t num_pins = load_word(&st);
+
+        printf("num_pins = %lu\n", num_pins);
+
+        for (int i=0; i<num_pins; i++) {
+                printf("\tload_pin() [remain=%lu]\n", st.wid);
+                if (st.wid < 32) die("load_pin(): EOF");
+                ctx->pins[alloc_pin(ctx).ix] = (hash256_t*) st.buf;
+                st.buf += 32;
+                st.wid -= 32;
+        }
+
+        uint64_t num_bars = load_word(&st);
+        printf("num_bars = %lu\n", num_bars);
+        for (int i=0; i<num_bars; i++) {
+                ctx->bars[alloc_bar(ctx).ix] = load_leaf(&st);
+        }
+
+        uint64_t num_nats = load_word(&st);
+
+        printf("num_nats = %lu\n", num_nats);
+        for (int i=0; i<num_nats; i++) {
+                ctx->nats[alloc_nat(ctx).ix] = load_leaf(&st);
+        }
+
+        uint64_t num_frags = load_word(&st);
+        printf("num_nats = %lu\n", num_nats);
+
+        if (num_frags == 0) {
+                uint64_t total_leaves = num_bars + num_nats + num_pins;
+                if (total_leaves == 0) die("No leaves\n");
+                if (total_leaves != 1) die("No frags, but more than one leaf\n");
+                if (num_pins) die("todo: return one pin\n");
+                if (num_bars) die("todo: return one bar\n");
+                if (num_nats) die("todo: return one nat\n");
+                die("impossible\n");
+        }
+
+        for (int i=0; i<num_frags; i++) {
+                printf("-   TODO: load frag #%d\n", i);
+        }
 }
 
 
@@ -1914,17 +2067,27 @@ int main () {
         tmp = jelly_pin(ctx, &dumb_hash_2);
         top = jelly_cons(ctx, tmp, top);
 
+        printf("# Shatter\n");
+
         shatter(ctx, top, true);
 
         jelly_debug(ctx);
 
+        printf("# Serialize\n");
+
         struct ser ser = serialize(ctx);
 
-        // fwrite(ser.buf, 1, ser.wid, stdout);
+        printf("# Clean Slate\n");
+        wipe_jelly_ctx(ctx);
+        // jelly_debug(ctx);
+
+        printf("# De-serialize\n");
+        deserialize(ctx, ser);
+
+        jelly_debug(ctx);
 
         free(ser.buf);
         free_jelly_ctx(ctx);
-
 
         return 0;
 }
