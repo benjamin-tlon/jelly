@@ -659,6 +659,22 @@ treenode_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
         return pointer;
 }
 
+frag_t alloc_frag(Jelly *ctx, FragVal frag) {
+        uint32_t nex = ctx->frags_count++;
+        uint32_t wid = ctx->frags_width;
+
+        if (nex >= wid) {
+                wid *= 2;
+                ctx->frags = reallocarray(ctx->frags, wid, sizeof(ctx->frags[0]));
+                ctx->frags_width = wid;
+        }
+
+        ctx->frags[nex] = frag;
+
+        return (frag_t){ .ix = nex };
+}
+
+
 /*
         When we encounter our second reference to an interned interior
         node, we shatter it.
@@ -682,20 +698,14 @@ void frag(Jelly *ctx, treenode_t tree, uint32_t leaf_count) {
         treenode_t hed = NODEVAL_HEAD(val);
         treenode_t tel = NODEVAL_TAIL(val);
 
-        uint32_t nex = ctx->frags_count++;
-        uint32_t wid = ctx->frags_width;
-
-        if (nex >= wid) {
-                wid *= 2;
-                ctx->frags = reallocarray(ctx->frags, wid, sizeof(ctx->frags[0]));
-                ctx->frags_width = wid;
-        }
+        frag_t frag = alloc_frag(ctx, (FragVal){ .head=hed,
+                                                 .tail=tel,
+                                                 .leaves=leaf_count,
+                                               });
 
         printf("%u", leaf_count);
 
-        ctx->frags[nex] = (FragVal){ .head = hed, .tail = tel, .leaves = leaf_count };
-
-        ctx->treenodes[tree.ix] = TAG_FRAG((frag_t) { .ix = nex });
+        ctx->treenodes[tree.ix] = TAG_FRAG(frag);
 }
 
 struct shatter {
@@ -1447,6 +1457,176 @@ FORCE_INLINE leaf_t load_leaf(struct ser *st) {
 }
 
 /*
+        Alright, what's the algorithm here?
+
+        To read a bit:
+
+            mask the against `1<<red`.
+            bit = (acc & (1<<red));
+            red = (red+1) & 8;
+            if (!red) { WIDTH_CHECK; acc = *buf++; }
+
+        To read a tree:
+
+            -   Read a bit.
+
+            -   If the bit is zero, this is a leaf
+                -   Read n bits.
+                -   n is the bit-width of the maximum backref at this point.
+                -   Use the resulting word, to construct a TreeVal.
+
+                    Can we do better than the following?
+
+                        CHECK_IF_WITHIN_MAXREF()
+                        if (bits < num_pins) return TAG_PIN(bits);
+                        bits -= num_pins
+                        if (bits < num_bars) return TAG_BAR(bits);
+                        bits -= num_bars;
+                        if (bits < num_nats) return TAG_NAT(bits);
+                        bits -= num_nats;
+                        return TAG_FRAG(bits);
+
+            -   Otherwise, this is a cell.
+
+                Here, just use naive recursion, this is not
+                performance-sensitive code.
+
+                Just call load_frag() directly, since that gets a pair.
+
+                    (Uninline it and make it into a function againn);
+
+            -   That's it!  This is not terribly complicated.
+*/
+
+struct frag_loader_state {
+        Jelly *ctx;
+        uint8_t *buf; // Pointer into the remaining bytes.
+        uint64_t wid; // Remaining bytes in the buffer.
+        uint8_t acc;  // The last byte read from the buffer.
+        uint64_t red; // The number of bits of `acc` that have been consumed.
+
+        uint64_t ref_bits; // The number of bits per leaf
+        uint64_t max_ref;  // The maximum ref that we can accept;
+        uint64_t num_pins;
+        uint64_t num_bars;
+        uint64_t num_nats;
+};
+
+struct load_fragtree_result {
+        treenode_t tree;
+        uint32_t leaves;
+};
+
+struct load_fragtree_result load_fragtree(struct frag_loader_state *s);
+
+FragVal load_fragment(struct frag_loader_state *s) {
+        struct load_fragtree_result hed = load_fragtree(s);
+        struct load_fragtree_result tel = load_fragtree(s);
+
+        uint32_t leaves = hed.leaves + tel.leaves;
+
+        FragVal fv = { .head=hed.tree, .tail=tel.tree, .leaves=leaves };
+        return fv;
+}
+
+treenode_value decode_leaf(struct frag_loader_state *s, uint32_t leaf) {
+        if (leaf < s->num_pins) return TAG_PIN((pin_t){leaf});
+
+        leaf -= s->num_pins;
+        if (leaf < s->num_bars) {
+                return TAG_BAR((bar_t){leaf});
+        }
+
+        leaf -= s->num_bars;
+        if (leaf < s->num_nats) {
+                return TAG_NAT((nat_t){leaf});
+        }
+
+        leaf -= s->num_nats;
+        return TAG_FRAG((frag_t){leaf});
+}
+
+struct load_fragtree_result
+load_fragtree(struct frag_loader_state *s) {
+        int refbits = s->ref_bits;
+
+        uint8_t bit = (s->acc & (1 << s->red));
+
+        s->red = (s->red + 1) % 8;
+        if (!s->red) {
+                // WIDTH_CHECK
+                s->acc = *(s->buf)++;
+        }
+
+        if (bit) {
+                printf("cell\n");
+                FragVal res = load_fragment(s);
+                treenode_t tr = alloc_treenode(s->ctx, TAG_PAIR(res.head, res.tail));
+                return (struct load_fragtree_result){ .tree=tr, .leaves=res.leaves };
+        }
+
+        printf("leaf\n");
+        printf("refbits=%u\n", refbits);
+
+        //      -   Read n bits.
+        //      -   n is the bit-width of the maximum backref at this point.
+        uint32_t leaf_mask = (1 << refbits) - 1;
+
+        uint32_t leaf = (s->acc >> s->red) & leaf_mask;
+
+        printf("acc=%u red=%lu | mask=%u leaf=%u\n", s->acc, s->red, leaf_mask, leaf);
+
+        int oldred = s->red;
+        printf("[[refbits=%d oldred=%d]]\n", refbits, oldred);
+
+        s->red += refbits;
+
+        if (s->red >= 8) {
+                int extra   = (oldred + refbits) - 8;
+                int remain  = 8-extra;
+                int already = refbits - extra;
+
+                uint8_t nex = s->buf[0];
+
+                uint8_t why = nex & ((1<<extra) - 1);
+                uint8_t more = why << already;
+
+                printf("[[nex=%u extra=%u remain=%u already=%u more=%u why=%u]]\n", nex, extra, remain, already, more, why);
+
+                leaf |= more;
+
+                s->red -= 8;
+                s->acc = nex;
+                s->buf++;
+        }
+
+        if (leaf > s->max_ref) {
+                die("leaf val is out-of-bounds\n");
+        }
+
+        treenode_value v = decode_leaf(s, leaf);
+
+        treenode_t t = alloc_treenode(s->ctx, v);
+
+        return (struct load_fragtree_result){ .tree = t, .leaves = 0 };
+
+/*
+                -   Use the resulting word, to construct a TreeVal.
+
+                    Can we do better than the following?
+
+                        if (bits < num_pins) return TAG_PIN(bits);
+                        bits -= num_pins
+                        if (bits < num_bars) return TAG_BAR(bits);
+                        bits -= num_bars;
+                        if (bits < num_nats) return TAG_NAT(bits);
+                        bits -= num_nats;
+                        return TAG_FRAG(bits);
+
+*/
+}
+
+/*
         Note that for pins, indirect atoms, and indirect bars we do not
         copy, we just slice the input buffer.
 */
@@ -1481,18 +1661,34 @@ void deserialize(Jelly *ctx, struct ser st) {
         uint64_t num_frags = load_word(&st);
         printf("num_nats = %lu\n", num_nats);
 
-        if (num_frags == 0) {
-                uint64_t total_leaves = num_bars + num_nats + num_pins;
-                if (total_leaves == 0) die("No leaves\n");
-                if (total_leaves != 1) die("No frags, but more than one leaf\n");
-                if (num_pins) die("todo: return one pin\n");
-                if (num_bars) die("todo: return one bar\n");
-                if (num_nats) die("todo: return one nat\n");
-                die("impossible\n");
+        if (num_frags) {
+                uint8_t acc = *st.buf++;
+
+                struct frag_loader_state s = {
+                        .ctx = ctx,
+                        .buf = (uint8_t*) st.buf,
+                        .acc = acc,
+                        .red = 0,
+                        .ref_bits = 0,
+                        .max_ref = 0,
+                        .num_pins = num_pins,
+                        .num_bars = num_bars,
+                        .num_nats = num_nats,
+                };
+
+                for (int i=0; i<num_frags; i++) {
+                        int num_refs = num_pins + num_bars + num_nats + i;
+                        s.max_ref  = num_refs - 1;
+                        s.ref_bits = word64_bits(s.max_ref);
+
+                        FragVal fv = load_fragment(&s);
+                        frag_t frag = alloc_frag(ctx, fv);
+                        printf("loaded frag %u\n", frag.ix);
+                }
         }
 
-        for (int i=0; i<num_frags; i++) {
-                printf("-   TODO: load frag #%d\n", i);
+        if (st.wid != 0) {
+                printf("EXTRA STUFF!\n");
         }
 }
 
@@ -2057,15 +2253,15 @@ void jelly_debug(Jelly *ctx) {
 int main () {
         Jelly *ctx = new_jelly_ctx();
 
-        hash256_t dumb_hash_1 = { fmix64(111111), fmix64(65535), fmix64(9),  65536 };
-        hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
+        // hash256_t dumb_hash_1 = { fmix64(111111), fmix64(65535), fmix64(9),  65536 };
+        // hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
         treenode_t top = read_some(ctx);
-        treenode_t tmp = jelly_pin(ctx, &dumb_hash_1);
-        top = jelly_cons(ctx, tmp, top);
-        tmp = jelly_pin(ctx, &dumb_hash_1);
-        top = jelly_cons(ctx, tmp, top);
-        tmp = jelly_pin(ctx, &dumb_hash_2);
-        top = jelly_cons(ctx, tmp, top);
+        // treenode_t tmp = jelly_pin(ctx, &dumb_hash_1);
+        // top = jelly_cons(ctx, tmp, top);
+        // tmp = jelly_pin(ctx, &dumb_hash_1);
+        // top = jelly_cons(ctx, tmp, top);
+        // tmp = jelly_pin(ctx, &dumb_hash_2);
+        // top = jelly_cons(ctx, tmp, top);
 
         printf("# Shatter\n");
 
