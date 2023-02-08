@@ -1781,12 +1781,6 @@ uint64_t pack_bytes_lsb(size_t width, char *bytes) {
         return res;
 }
 
-treenode_t read_leaf(Jelly*);
-
-treenode_t read_one(Jelly*);
-treenode_t read_many(Jelly*, treenode_t);
-treenode_t read_some(Jelly*);
-
 // TODO: Instead of reading pairs, use an accumulator byte like when
 // we bit-deserialize.
 leaf_t read_hex() {
@@ -1897,13 +1891,9 @@ leaf_t read_string() {
 
 }
 
-treenode_t read_some(Jelly *ctx) {
-        return read_many(ctx, read_one(ctx));
-}
-
-void read_line_comment() {
+void eat_comment() {
     loop:
-        char c = getchar();
+        int c = getchar();
         switch (c) {
             case EOF:
             case '\n':
@@ -1913,63 +1903,25 @@ void read_line_comment() {
         }
 }
 
-treenode_t read_many(Jelly *ctx, treenode_t acc) {
+void eat_space() {
     loop:
         int c = getchar();
-
         switch (c) {
-            case '"': {
-                treenode_t elmt = jelly_bar(ctx, read_string());
-                acc = jelly_cons(ctx, acc, elmt);
-                goto loop;
-            }
-            case '(':
-                acc = jelly_cons(ctx, acc, read_many(ctx, read_one(ctx)));
-                goto loop;
-            case EOF:
-            case ')':
-                return acc;
             case '#':
-                read_line_comment();
+                eat_comment();
                 goto loop;
-            case ' ':
             case '\n':
-            case '\r':
             case '\t':
+            case ' ':
                 goto loop;
-            case '0': {
-                // TODO Break this out so that it can be implemented in
-                // `read_one` also.
-                c = getchar();
-                if (c == 'x') {
-                        treenode_t elmt = jelly_nat(ctx, read_hex());
-                        acc = jelly_cons(ctx, acc, elmt);
-                        goto loop;
-                } else if (isdigit(c)) {
-                        die("Non-zero numbers must not be zero-prefixed");
-                } else {
-                        ungetc(c, stdin);
-                        uint32_t width = word64_bytes(0);
-                        treenode_t elmt = jelly_packed_nat(ctx, width, 0);
-                        acc = jelly_cons(ctx, acc, elmt);
-                        goto loop;
-                }
-            }
             default:
-                if isdigit(c) {
-                        uint64_t word = read_word((uint64_t)(c - '0'));
-                        uint32_t width = word64_bytes(word);
-                        treenode_t elmt = jelly_packed_nat(ctx, width, word);
-                        acc = jelly_cons(ctx, acc, elmt);
-                        goto loop;
-                } else {
-                        die("Unexpected character: %c (read_many)\n", c);
-                }
+                ungetc(c, stdin);
+                return;
         }
 }
 
 treenode_t read_leaf(Jelly *ctx) {
-        char c = getchar();
+        int c = getchar();
 
         switch (c) {
             case '"':
@@ -1977,7 +1929,7 @@ treenode_t read_leaf(Jelly *ctx) {
             case '[':
                 die("TODO: Parse pins\n");
             case '0': {
-                char d = getchar();
+                int d = getchar();
                 if (d == 'x') {
                         return jelly_nat(ctx, read_hex());
                 }
@@ -2001,20 +1953,37 @@ treenode_t read_leaf(Jelly *ctx) {
 }
 
 
-treenode_t read_one(Jelly *ctx) {
-        int c = getchar();
+treenode_t read_one(Jelly*);
+treenode_t read_many(Jelly*);
+
+treenode_t read_many(Jelly *ctx) {
+       treenode_t acc = read_one(ctx);
     loop:
+        eat_space();
+
+        int c = getchar();
         switch (c) {
             case '(':
-                return read_many(ctx, read_one(ctx));
-            case '#':
-                read_line_comment();
+                treenode_t list = read_many(ctx);
+                acc = jelly_cons(ctx, acc, list);
                 goto loop;
-            case ' ':
-            case '\n':
-            case '\r':
-            case '\t':
+            case EOF:
+            case ')':
+                return acc;
+            default:
+                ungetc(c, stdin);
+                treenode_t elmt = read_leaf(ctx);
+                acc = jelly_cons(ctx, acc, elmt);
                 goto loop;
+        }
+}
+
+treenode_t read_one(Jelly *ctx) {
+        eat_space();
+        int c = getchar();
+        switch (c) {
+            case '(':
+                return read_many(ctx);
             case EOF:
                 die("Unexpected EOF (read_one)\n");
             default:
@@ -2382,7 +2351,7 @@ int main () {
 
         hash256_t dumb_hash_1 = { fmix64(111111), fmix64(65535), fmix64(9),  65536 };
         hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
-        treenode_t top = read_some(ctx);
+        treenode_t top = read_many(ctx);
         treenode_t tmp = jelly_pin(ctx, &dumb_hash_1);
         top = jelly_cons(ctx, tmp, top);
         tmp = jelly_pin(ctx, &dumb_hash_1);
