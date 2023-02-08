@@ -22,9 +22,9 @@ void pass() {}
 // Internal murmur3 stuff //////////////////////////////////////////////////////
 
 #ifdef __GNUC__
-#define FORCE_INLINE __attribute__((always_inline)) inline
+#define INLINE __attribute__((always_inline)) inline
 #else
-#define FORCE_INLINE inline
+#define INLINE inline
 #endif
 
 #define BIG_CONSTANT(x) (x##LLU)
@@ -33,7 +33,7 @@ void pass() {}
         Taken from murmur3.  Used to bit-mix direct atoms and
         shape-signatures.
 */
-static FORCE_INLINE uint64_t fmix64 (uint64_t k) {
+static INLINE uint64_t fmix64 (uint64_t k) {
         k ^= k >> 33;
         k *= BIG_CONSTANT(0xff51afd7ed558ccd);
         k ^= k >> 33;
@@ -61,7 +61,7 @@ size_t hash_combine(uint64_t x, uint64_t y) {
         We explicitly handle the 0 cases, since __builtin_clzll is
         undefined in this situation.
 */
-FORCE_INLINE int word64_bits (uint64_t w) {
+INLINE int word64_bits (uint64_t w) {
         if (!w) { return 0; }
         return 64 - __builtin_clzll(w);
 }
@@ -195,25 +195,25 @@ void print_tree_outline(Jelly*, treenode_t);
 void print_tree(Jelly*, treenode_t);
 
 
-FORCE_INLINE treenode_value TAG_FRAG(frag_t frag) {
+INLINE treenode_value TAG_FRAG(frag_t frag) {
         uint64_t index = (uint64_t) frag.ix;
         uint64_t word  = (index | 7ULL << 61);
         return (treenode_value){ word };
 }
 
-FORCE_INLINE treenode_value TAG_PIN(pin_t pin) {
+INLINE treenode_value TAG_PIN(pin_t pin) {
         uint64_t index = (uint64_t) pin.ix;
         uint64_t word  = (index | 4ULL << 61);
         return (treenode_value){ word };
 }
 
-FORCE_INLINE treenode_value TAG_BAR(bar_t bar) {
+INLINE treenode_value TAG_BAR(bar_t bar) {
         uint64_t index = (uint64_t) bar.ix;
         uint64_t word  = (index | 5ULL << 61);
         return (treenode_value){ word };
 }
 
-FORCE_INLINE treenode_value TAG_NAT(nat_t nat) {
+INLINE treenode_value TAG_NAT(nat_t nat) {
         uint64_t index = (uint64_t) nat.ix;
         uint64_t word  = (index | 6ULL << 61);
         return (treenode_value){ word };
@@ -222,43 +222,43 @@ FORCE_INLINE treenode_value TAG_NAT(nat_t nat) {
 // Pack two 32-bit indicies into one 64-bit words.  Since these indicies
 // should both fit in 31 bits, we rely on the top-bit being set to zero
 // and use that as a type-tag.
-FORCE_INLINE treenode_value TAG_PAIR(treenode_t hed, treenode_t tel) {
+INLINE treenode_value TAG_PAIR(treenode_t hed, treenode_t tel) {
         uint64_t hed_word  = (uint64_t) hed.ix;
         uint64_t tel_word  = (uint64_t) tel.ix;
         uint64_t result = ((hed_word << 32) | tel_word);
         return (treenode_value){ .word = result };
 }
 
-FORCE_INLINE uint64_t NODEVAL_TAG(treenode_value v) {
+INLINE uint64_t NODEVAL_TAG(treenode_value v) {
         return (v.word >> 61);
 }
 
-FORCE_INLINE treenode_t NODEVAL_HEAD(treenode_value v) {
+INLINE treenode_t NODEVAL_HEAD(treenode_value v) {
         return (treenode_t){ .ix = (uint32_t) (v.word >> 32) };
 }
 
 // We rely on the cast to drop the high-bits.
-FORCE_INLINE treenode_t NODEVAL_TAIL(treenode_value v) {
+INLINE treenode_t NODEVAL_TAIL(treenode_value v) {
         return (treenode_t){ .ix = (uint32_t) v.word };
 }
 
 // We rely on the cast to drop the high-bits.
-FORCE_INLINE nat_t NODEVAL_NAT(treenode_value v) {
+INLINE nat_t NODEVAL_NAT(treenode_value v) {
         return (nat_t){ .ix = (uint32_t) v.word };
 }
 
 // We rely on the cast to drop the high-bits.
-FORCE_INLINE frag_t NODEVAL_FRAG(treenode_value v) {
+INLINE frag_t NODEVAL_FRAG(treenode_value v) {
         return (frag_t){ .ix = (uint32_t) v.word };
 }
 
 // We rely on the cast to drop the high-bits.
-FORCE_INLINE bar_t NODEVAL_BAR(treenode_value v) {
+INLINE bar_t NODEVAL_BAR(treenode_value v) {
         return (bar_t){ .ix = (uint32_t) v.word };
 }
 
 // We rely on the cast to drop the high-bits.
-FORCE_INLINE pin_t NODEVAL_PIN(treenode_value v) {
+INLINE pin_t NODEVAL_PIN(treenode_value v) {
         return (pin_t){ .ix = (uint32_t) v.word };
 }
 
@@ -345,7 +345,7 @@ void free_jelly_ctx (Jelly *ctx) {
 }
 
 
-FORCE_INLINE treenode_t alloc_treenode(Jelly *c, treenode_value v) {
+INLINE treenode_t alloc_treenode(Jelly *c, treenode_value v) {
         uint32_t res = c->treenodes_count++;
         uint32_t wid = c->treenodes_width;
 
@@ -370,18 +370,18 @@ FORCE_INLINE treenode_t alloc_treenode(Jelly *c, treenode_value v) {
         10xx.. indicates a pin
         11xx.. indicates a bar
 */
-FORCE_INLINE tagged_width_t NAT_TAGGED_WIDTH(uint32_t bytes) {
+INLINE tagged_width_t NAT_TAGGED_WIDTH(uint32_t bytes) {
         uint64_t word = bytes;
         return (tagged_width_t){ .word = word };
 }
 
-FORCE_INLINE tagged_width_t PIN_TAGGED_WIDTH(uint32_t bytes) {
+INLINE tagged_width_t PIN_TAGGED_WIDTH(uint32_t bytes) {
         uint64_t word = bytes;
         word |= 2ULL << 62;
         return (tagged_width_t){ .word = word };
 }
 
-FORCE_INLINE tagged_width_t BAR_TAGGED_WIDTH(uint32_t bytes) {
+INLINE tagged_width_t BAR_TAGGED_WIDTH(uint32_t bytes) {
         uint64_t word = bytes;
         word |= 3ULL << 62;
         return (tagged_width_t){ .word = word };
@@ -759,7 +759,7 @@ struct shatter shatter(Jelly *ctx, treenode_t tree, bool top) {
 
 // Inserting Nats //////////////////////////////////////////////////////////////
 
-FORCE_INLINE nat_t alloc_nat(Jelly *c) {
+INLINE nat_t alloc_nat(Jelly *c) {
         uint32_t res = c->nats_count++;
         uint32_t wid = c->nats_width;
 
@@ -779,7 +779,7 @@ new_nat (Jelly *ctx, leaf_t leaf) {
         return alloc_treenode(ctx, TAG_NAT(nat));
 }
 
-FORCE_INLINE static treenode_t
+INLINE static treenode_t
 jelly_packed_nat(Jelly *ctx, uint32_t byte_width, uint64_t word) {
         debugf("\tjelly_packed_nat(%lu, width=%u)\n", word, byte_width);
 
@@ -817,7 +817,7 @@ treenode_t jelly_nat(Jelly *ctx, leaf_t leaf) {
 
 // Inserting Bars //////////////////////////////////////////////////////////////
 
-FORCE_INLINE bar_t alloc_bar(Jelly *c) {
+INLINE bar_t alloc_bar(Jelly *c) {
         uint32_t res = c->bars_count++;
         uint32_t wid = c->bars_width;
 
@@ -870,7 +870,7 @@ treenode_t jelly_bar(Jelly *ctx, leaf_t leaf) {
 
 // Inserting Pins //////////////////////////////////////////////////////////////
 
-FORCE_INLINE pin_t alloc_pin(Jelly *c) {
+INLINE pin_t alloc_pin(Jelly *c) {
         uint32_t res = c->pins_count++;
         uint32_t wid = c->pins_width;
 
@@ -1345,7 +1345,7 @@ struct ser serialize(Jelly *ctx) {
 }
 
 
-FORCE_INLINE uint8_t load_byte(struct ser *st) {
+INLINE uint8_t load_byte(struct ser *st) {
     debugf("\tload_byte() [remain=%lu]\n", st->wid);
 
     // debugf("\t    [");
@@ -1409,7 +1409,7 @@ uint64_t load_word(struct ser *st) {
     return result;
 }
 
-FORCE_INLINE leaf_t load_leaf(struct ser *st) {
+INLINE leaf_t load_leaf(struct ser *st) {
         debugf("load_leaf:\n");
 
         leaf_t result;
