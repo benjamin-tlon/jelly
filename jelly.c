@@ -9,6 +9,15 @@
 #include "xxh3.h"
 #include "libbase58.h"
 
+#define DEBUG 0
+
+#if DEBUG
+#define debugf(...) printf(__VA_ARGS__)
+#else
+void pass() {}
+#define debugf(...) pass(__VA_ARGS__)
+#endif
+
 
 // Internal murmur3 stuff //////////////////////////////////////////////////////
 
@@ -403,11 +412,11 @@ void rehash_nodes_if_full(Jelly *ctx) {
 
         uint32_t newwid = oldwid*2;
 
-        printf("\t\tREHASH_NODES (old=%u new=%u)\n", oldwid, newwid);
+        debugf("\t\tREHASH_NODES (old=%u new=%u)\n", oldwid, newwid);
 
-        // printf("OLD TABLE:\n");
+        // debugf("OLD TABLE:\n");
         // jelly_debug_interior_nodes(ctx);
-        // printf("\n");
+        // debugf("\n");
 
         FanEntry *oldtab = ctx->nodes_table;
         FanEntry *newtab = malloc(newwid * sizeof(*newtab));
@@ -434,10 +443,10 @@ void rehash_nodes_if_full(Jelly *ctx) {
                         FanEntry *tar = newtab + j;
                         if (tar->val.word == UINT64_MAX) {
                                 *tar = ent;
-                                // printf("\t\t%lu -> %lu\n", i, j);
+                                // debugf("\t\t%lu -> %lu\n", i, j);
                                 break;
                         } // else {
-                                // printf("\t\t\t(%lu -> %lu) is taken\n", i, j);
+                                // debugf("\t\t\t(%lu -> %lu) is taken\n", i, j);
                         // }
                 }
         }
@@ -447,9 +456,9 @@ void rehash_nodes_if_full(Jelly *ctx) {
         ctx->nodes_table_width = newwid;
         ctx->nodes_table       = newtab;
 
-        // printf("NEW TABLE:\n");
+        // debugf("NEW TABLE:\n");
         // jelly_debug_interior_nodes(ctx);
-        // printf("\n");
+        // debugf("\n");
 }
 
 void rehash_leaves_if_full(Jelly *ctx) {
@@ -461,11 +470,11 @@ void rehash_leaves_if_full(Jelly *ctx) {
 
         uint32_t newwid = oldwid*2;
 
-        printf("\t\tREHASH_LEAVES (old=%u new=%u)\n", oldwid, newwid);
+        debugf("\t\tREHASH_LEAVES (old=%u new=%u)\n", oldwid, newwid);
 
-        // printf("OLD TABLE:\n");
+        // debugf("OLD TABLE:\n");
         // jelly_debug_leaves(ctx, false);
-        // printf("\n");
+        // debugf("\n");
 
         leaves_table_entry_t *oldtab = ctx->leaves_table;
         leaves_table_entry_t *newtab = malloc(newwid * sizeof(*newtab));
@@ -492,10 +501,10 @@ void rehash_leaves_if_full(Jelly *ctx) {
                         leaves_table_entry_t *tar = newtab + j;
                         if (tar->pointer.ix == UINT32_MAX) {
                                 *tar = ent;
-                                printf("\t\t%lu -> %lu\n", i, j);
+                                debugf("\t\t%lu -> %lu\n", i, j);
                                 break;
                         } else {
-                                printf("\t\t\t(%lu -> %lu) is taken\n", i, j);
+                                debugf("\t\t\t(%lu -> %lu) is taken\n", i, j);
                         }
                 }
         }
@@ -505,9 +514,9 @@ void rehash_leaves_if_full(Jelly *ctx) {
         ctx->leaves_table_width = newwid;
         ctx->leaves_table       = newtab;
 
-        // printf("NEW TABLE:\n");
+        // debugf("NEW TABLE:\n");
         // jelly_debug_leaves(ctx, false);
-        // printf("\n");
+        // debugf("\n");
 }
 
 
@@ -515,7 +524,7 @@ treenode_t insert_packed_leaf(Jelly *ctx, PackedInsertRequest req) {
         uint64_t tag   = (req.width.word >> 62);
         uint64_t bytes = (req.width.word << 2) >> 2;
 
-        printf(
+        debugf(
             "\tpacked_insert(tag=%lu, wid=%lu, hash=%lu, %lu)\n",
             tag,
             bytes,
@@ -552,12 +561,12 @@ treenode_t insert_packed_leaf(Jelly *ctx, PackedInsertRequest req) {
 
                 if (!match) continue;
 
-                printf("\t\tPACKED_LEAF_MATCH:\n\t\t\t");
+                debugf("\t\tPACKED_LEAF_MATCH:\n\t\t\t");
                 ctx->refcounts[ent->pointer.ix]++;
-                print_tree_outline(ctx, ent->pointer);
-                printf(" = ");
-                print_tree(ctx, ent->pointer);
-                printf("\n");
+                if (DEBUG) print_tree_outline(ctx, ent->pointer);
+                debugf(" = ");
+                if (DEBUG) print_tree(ctx, ent->pointer);
+                debugf("\n");
 
                 return ent->pointer;
         }
@@ -577,11 +586,11 @@ treenode_t insert_packed_leaf(Jelly *ctx, PackedInsertRequest req) {
 
         treenode_t pointer = req.new_leaf(ctx, leaf);
 
-        printf("\t\tNEW_PACKED_LEAF:\n\t\t\t");
-        print_tree_outline(ctx, pointer);
-        printf(" = ");
-        print_tree(ctx, pointer);
-        printf("\n");
+        debugf("\t\tNEW_PACKED_LEAF:\n\t\t\t");
+        if (DEBUG) print_tree_outline(ctx, pointer);
+        debugf(" = ");
+        if (DEBUG) print_tree(ctx, pointer);
+        debugf("\n");
 
         *ent = (leaves_table_entry_t){
             .hash  = req.hash,
@@ -596,7 +605,7 @@ treenode_t insert_packed_leaf(Jelly *ctx, PackedInsertRequest req) {
 void print_nat_leaf(Jelly*, leaf_t);
 
 treenode_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
-        printf("\tinsert_indirect_leaf(wid=%u)\n", req.leaf.width_bytes);
+        debugf("\tinsert_indirect_leaf(wid=%u)\n", req.leaf.width_bytes);
 
         /*
                 Do a linear-search over the leaves table, and return the
@@ -629,12 +638,12 @@ treenode_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
 
                 if (0 != memcmp(ent->bytes, byt, byt_wid)) continue;
 
-                printf("\t\tINDIRECT_LEAF_MATCH:\n\t\t\t");
+                debugf("\t\tINDIRECT_LEAF_MATCH:\n\t\t\t");
                 ctx->refcounts[ent->pointer.ix]++;
-                print_tree_outline(ctx, ent->pointer);
-                printf(" = ");
-                print_tree(ctx, ent->pointer);
-                printf("\n");
+                if (DEBUG) print_tree_outline(ctx, ent->pointer);
+                debugf(" = ");
+                if (DEBUG) print_tree(ctx, ent->pointer);
+                debugf("\n");
 
                 return ent->pointer;
         }
@@ -643,11 +652,11 @@ treenode_t insert_indirect_leaf(Jelly *ctx, IndirectInsertRequest req) {
 
         treenode_t pointer = req.new_leaf(ctx, req.leaf);
 
-        printf("\t\tNEW_INDIRECT_LEAF:\n\t\t\t");
-        print_tree_outline(ctx, pointer);
-        printf(" = ");
-        print_tree(ctx, pointer);
-        printf("\n");
+        debugf("\t\tNEW_INDIRECT_LEAF:\n\t\t\t");
+        if (DEBUG) print_tree_outline(ctx, pointer);
+        debugf(" = ");
+        if (DEBUG) print_tree(ctx, pointer);
+        debugf("\n");
 
         *ent = (leaves_table_entry_t){
             .hash  = req.hash,
@@ -703,7 +712,7 @@ void frag(Jelly *ctx, treenode_t tree, uint32_t leaf_count) {
                                                  .leaves=leaf_count,
                                                });
 
-        printf("%u", leaf_count);
+        debugf("%u", leaf_count);
 
         ctx->treenodes[tree.ix] = TAG_FRAG(frag);
 }
@@ -768,7 +777,7 @@ new_nat (Jelly *ctx, leaf_t leaf) {
 
 FORCE_INLINE static treenode_t
 jelly_packed_nat(Jelly *ctx, uint32_t byte_width, uint64_t word) {
-        printf("\tjelly_packed_nat(%lu, width=%u)\n", word, byte_width);
+        debugf("\tjelly_packed_nat(%lu, width=%u)\n", word, byte_width);
 
         return insert_packed_leaf(ctx,
             (PackedInsertRequest){
@@ -781,7 +790,7 @@ jelly_packed_nat(Jelly *ctx, uint32_t byte_width, uint64_t word) {
 }
 
 treenode_t jelly_nat(Jelly *ctx, leaf_t leaf) {
-        printf("\tjelly_nat(width=%d)\n", leaf.width_bytes);
+        debugf("\tjelly_nat(width=%d)\n", leaf.width_bytes);
 
         if (leaf.width_bytes < 9) {
                 return jelly_packed_nat(ctx, leaf.width_bytes, (uint64_t)leaf.bytes);
@@ -825,12 +834,12 @@ new_bar (Jelly *ctx, leaf_t leaf) {
 }
 
 treenode_t jelly_bar(Jelly *ctx, leaf_t leaf) {
-        printf("\tjelly_bar(width=%d)\n", leaf.width_bytes);
+        debugf("\tjelly_bar(width=%d)\n", leaf.width_bytes);
 
         if (leaf.width_bytes < 9) {
                 uint64_t word = (uint64_t) leaf.bytes;
 
-                printf("\tjelly_packed_bar(%lu, width=%u)\n", word, leaf.width_bytes);
+                debugf("\tjelly_packed_bar(%lu, width=%u)\n", word, leaf.width_bytes);
 
                 return insert_packed_leaf(ctx,
                     (PackedInsertRequest){
@@ -878,7 +887,7 @@ static treenode_t new_pin (Jelly *ctx, leaf_t leaf) {
 }
 
 treenode_t jelly_pin(Jelly *ctx, hash256_t *pin) {
-        printf("\tjelly_pin(hash=%lx)\n", pin->a);
+        debugf("\tjelly_pin(hash=%lx)\n", pin->a);
 
         uint64_t hash = pin->a;
 
@@ -918,9 +927,9 @@ treenode_t jelly_cons(Jelly *ctx, treenode_t hed, treenode_t tel) {
                 uint64_t word = cur->val.word;
 
                 if (word == target) {
-                        printf("\t\tTREE MATCH\n\t\t\tt%d = ", cur->pointer.ix);
-                        print_tree(ctx, cur->pointer);
-                        printf("\n");
+                        debugf("\t\tTREE MATCH\n\t\t\tt%d = ", cur->pointer.ix);
+                        if (DEBUG) print_tree(ctx, cur->pointer);
+                        debugf("\n");
 
                         ctx->refcounts[cur->pointer.ix]++;
 
@@ -964,15 +973,15 @@ void word_dump(uint8_t **ptr, uint64_t word) {
 
                 uint8_t tagged_width = width | (2<<6); // 0b10xxxxxx
 
-                printf("\tword_dump: width = %u\n", width);
-                printf("\tword_dump: tagged_width = %u\n", tagged_width);
+                debugf("\tword_dump: width = %u\n", width);
+                debugf("\tword_dump: tagged_width = %u\n", tagged_width);
 
                 *buf++ = tagged_width;
 
                 // TODO Can I use memcpy here?
                 for (int i=0; i<width; i++) {
                         uint8_t byte = word;
-                        printf("\tword_dump: byte[%d] = %u (rest=%lu)\n", i, byte, word);
+                        debugf("\tword_dump: byte[%d] = %u (rest=%lu)\n", i, byte, word);
                         *buf++ = byte;
                         word = word >> 8;
                 }
@@ -988,18 +997,18 @@ void word_dump(uint8_t **ptr, uint64_t word) {
 // width=256 -> 0b11000010_00000000_000000001_xxxxxxxx(*256)
 uint64_t leaf_dumpsize(leaf_t leaf) {
         if (leaf.width_bytes < 9) {
-                // printf("\tDIRECT (word=%lu)\n", (uint64_t) leaf.bytes);
+                // debugf("\tDIRECT (word=%lu)\n", (uint64_t) leaf.bytes);
                 return word_dumpsize((uint64_t) leaf.bytes);
         }
 
         // single-byte length field
         if (leaf.width_bytes < 64) {
-                // printf("\tSHORT\n");
+                // debugf("\tSHORT\n");
                 return 1 + leaf.width_bytes;
         }
 
         // variable-byte length field
-        // printf("\tLONG %d %u\n", leaf.width_bytes, word64_bytes(leaf.width_bytes));
+        // debugf("\tLONG %d %u\n", leaf.width_bytes, word64_bytes(leaf.width_bytes));
         return 1 + word64_bytes(leaf.width_bytes) + leaf.width_bytes;
 }
 
@@ -1008,16 +1017,16 @@ uint8_t *dump_leaf(uint8_t *buf, leaf_t leaf) {
         uint64_t wid = leaf.width_bytes;
 
         if (wid < 9) {
-                printf("\tdump direct\n");
+                debugf("\tdump direct\n");
                 word_dump(&buf, (uint64_t) leaf.bytes);
                 return buf;
         }
 
         if (wid < 64) {
-                printf("\tdump small [wid=%lu]\n", wid);
+                debugf("\tdump small [wid=%lu]\n", wid);
                 uint8_t wid_byte = wid;
                 uint8_t wid_tagged = (wid_byte | 128); // 0b10xxxxxx
-                printf("\t\twidth_tagged = %u\n", wid_tagged);
+                debugf("\t\twidth_tagged = %u\n", wid_tagged);
                 *buf++ = wid_tagged;
                 memcpy(buf, leaf.bytes, wid);
                 buf += wid;
@@ -1025,7 +1034,7 @@ uint8_t *dump_leaf(uint8_t *buf, leaf_t leaf) {
         }
 
         {
-                printf("\tdump big\n");
+                debugf("\tdump big\n");
                 uint8_t widwid = word64_bytes(wid);
 
                 *buf++ = (widwid | 192); // 0b11xxxxxx
@@ -1053,8 +1062,9 @@ struct ser {
 };
 
 void showbits(char *key, int wid, int num, uint64_t bits) {
-        if (key) printf(" %s:", key);
-        else printf(" (");
+        if (!DEBUG) return;
+        if (key) debugf(" %s:", key);
+        else debugf(" (");
 
         int extra = wid - num;
         for (int i=0; i<extra; i++) putchar('_');
@@ -1096,12 +1106,12 @@ void serialize_frag(Jelly *ctx, struct frag_state *st, FragVal frag) {
                 treenode_value val = ctx->treenodes[t.ix];
 
                 if (val.word >> 63) {
-                        printf("\n");
-                        for (int x=0; x<sp; x++) putchar(' ');
-                        print_tree_outline(ctx, t);
-                        //printf("\n");
+                        debugf("\n");
+                        for (int x=0; x<sp; x++) debugf(" ");
+                        if (DEBUG) print_tree_outline(ctx, t);
+                        //debugf("\n");
 
-                        printf("\n\t\t\t\t");
+                        debugf("\n\t\t\t\t");
                         showbits(NULL, 8, fil, acc);
 
                         // Output a zero bit
@@ -1117,7 +1127,7 @@ void serialize_frag(Jelly *ctx, struct frag_state *st, FragVal frag) {
                         uint8_t new_bits = (bits << fil);
                         uint8_t overflow = (bits >> (8 - fil));
 
-                        // printf(" [extra=%u]", extra);
+                        // debugf(" [extra=%u]", extra);
                         showbits("v", refbits, refbits, bits);
 
                         // int new_count = ((fil+refbits)>8) ? 8 : (fil + refbits);
@@ -1137,15 +1147,15 @@ void serialize_frag(Jelly *ctx, struct frag_state *st, FragVal frag) {
 
                         showbits(NULL, 8, fil, acc);
 
-                        printf("\n");
+                        debugf("\n");
                         sp--;
                 } else {
-                        printf("\n");
-                        for (int x=0; x<sp; x++) putchar(' ');
-                        printf("-");
+                        debugf("\n");
+                        for (int x=0; x<sp; x++) debugf(" ");
+                        debugf("-");
                         parens++;
 
-                        printf("\n\t\t\t\t");
+                        debugf("\n\t\t\t\t");
                         showbits(NULL, 8, fil, acc);
 
                         // Output a 1 bit.
@@ -1178,34 +1188,34 @@ struct ser serialize(Jelly *ctx) {
 
         refrs += numpins;
         width += word_dumpsize(numpins);
-        printf("buffer_bytes (after pin_width) = %lu\n", width);
+        debugf("buffer_bytes (after pin_width) = %lu\n", width);
         width += numpins * sizeof(hash256_t);
-        printf("buffer_bytes (after pins) = %lu\n", width);
+        debugf("buffer_bytes (after pins) = %lu\n", width);
 
         refrs += numbars;
         width += word_dumpsize(numbars);
-        printf("buffer_bytes (bar_width) = %lu\n", width);
+        debugf("buffer_bytes (bar_width) = %lu\n", width);
         for (int i=0; i<numbars; i++) {
                 width += leaf_dumpsize(ctx->bars[i]);
-                printf("buffer_bytes (after b%d) = %lu\n", i, width);
-                printf("\n\tb%d = ", i);
-                print_bar(ctx, (bar_t){ .ix = i });
-                printf("\n\n");
+                debugf("buffer_bytes (after b%d) = %lu\n", i, width);
+                debugf("\n\tb%d = ", i);
+                if (DEBUG) print_bar(ctx, (bar_t){ .ix = i });
+                debugf("\n\n");
         }
 
         refrs += numnats;
         width += word_dumpsize(numnats);
-        printf("buffer_bytes (after nats count) = %lu\n", width);
+        debugf("buffer_bytes (after nats count) = %lu\n", width);
         for (int i=0; i<numnats; i++) {
                 width += leaf_dumpsize(ctx->nats[i]);
-                printf("buffer_bytes (after n%d) = %lu\n", i, width);
-                printf("\n\tn%d = ", i);
-                print_nat(ctx, (nat_t){ .ix = i });
-                printf("\n\n");
+                debugf("buffer_bytes (after n%d) = %lu\n", i, width);
+                debugf("\n\tn%d = ", i);
+                if (DEBUG) print_nat(ctx, (nat_t){ .ix = i });
+                debugf("\n\n");
         }
 
         width += word_dumpsize(ctx->frags_count);
-        printf("buffer_bytes (after frags count) = %lu\n", width);
+        debugf("buffer_bytes (after frags count) = %lu\n", width);
 
         uint64_t treebits = 0;
 
@@ -1222,11 +1232,11 @@ struct ser serialize(Jelly *ctx) {
                 treebits += frag_bits;
                 refrs++;
 
-                printf("tree_bits (frags) = %lu\n", treebits);
-                printf("\n\t[maxref=%u leafwid=%u leaves=%u bits=%u]\n", maxref, leaf_width, leaves, frag_bits);
-                printf("\n\t\tf%d = ", i);
-                print_fragment_outline(ctx, (frag_t){i});
-                printf("\n\n");
+                debugf("tree_bits (frags) = %lu\n", treebits);
+                debugf("\n\t[maxref=%u leafwid=%u leaves=%u bits=%u]\n", maxref, leaf_width, leaves, frag_bits);
+                debugf("\n\t\tf%d = ", i);
+                if (DEBUG) print_fragment_outline(ctx, (frag_t){i});
+                debugf("\n\n");
         }
 
         // Tree-bits is padded to be a multiple of 8 (treat as a byte-array);
@@ -1236,7 +1246,7 @@ struct ser serialize(Jelly *ctx) {
         // Add in the tree bits;
         width += (treebits/8);
 
-        printf("total_byte_width = %lu\n", width);
+        debugf("total_byte_width = %lu\n", width);
 
         size_t total_byte_width = width;
 
@@ -1245,7 +1255,7 @@ struct ser serialize(Jelly *ctx) {
         uint64_t hanging_bytes = width % 8;
         if (hanging_bytes) width += (8 - hanging_bytes);
 
-        printf("padded byte width = %lu\n", width);
+        debugf("padded byte width = %lu\n", width);
 
         struct ser result = (struct ser) { .buf = calloc(1, width), .wid = total_byte_width };
 
@@ -1257,7 +1267,7 @@ struct ser serialize(Jelly *ctx) {
 
         word_dump(&out, numpins);
         for (int i=0; i<numpins; i++) {
-                printf("p%d\n", i);
+                debugf("p%d\n", i);
                 hash256_t *pin = ctx->pins[i];
                 memcpy(out, pin, 32);
                 out += 32;
@@ -1265,13 +1275,13 @@ struct ser serialize(Jelly *ctx) {
 
         word_dump(&out, numbars);
         for (int i=0; i<numbars; i++) {
-                printf("b%d\n", i);
+                debugf("b%d\n", i);
                 out = dump_leaf(out, ctx->bars[i]);
         }
 
         word_dump(&out, numnats);
         for (int i=0; i<numnats; i++) {
-                printf("n%d\n", i);
+                debugf("n%d\n", i);
                 out = dump_leaf(out, ctx->nats[i]);
         }
 
@@ -1297,7 +1307,7 @@ struct ser serialize(Jelly *ctx) {
                 uint64_t maxref  = frgoff + i - 1;
                 uint64_t refbits = word64_bits(maxref);
 
-                printf("\nFRAG(%d) [maxref=%lu refbits=%lu]\n\n", i, maxref, refbits);
+                debugf("\nFRAG(%d) [maxref=%lu refbits=%lu]\n\n", i, maxref, refbits);
 
                 st.offs[0] = pinoff;
                 st.offs[1] = baroff;
@@ -1313,9 +1323,9 @@ struct ser serialize(Jelly *ctx) {
         fil = st.fil;
 
         if (fil > 0) {
-                printf("\n");
+                debugf("\n");
                 showbits("final_flush", 8, 8, acc);
-                printf("\n\n");
+                debugf("\n\n");
                 *out++ = acc;
                 acc = 0;
                 fil = 0;
@@ -1328,16 +1338,16 @@ struct ser serialize(Jelly *ctx) {
 
 
 FORCE_INLINE uint8_t load_byte(struct ser *st) {
-    printf("\tload_byte() [remain=%lu]\n", st->wid);
+    debugf("\tload_byte() [remain=%lu]\n", st->wid);
 
-    // printf("\t    [");
-    // for (int i=0; i<10; i++) printf("%u%s", (uint8_t) st->buf[i], (i==9 ? "" : " "));
-    // printf("]\n");
+    // debugf("\t    [");
+    // for (int i=0; i<10; i++) debugf("%u%s", (uint8_t) st->buf[i], (i==9 ? "" : " "));
+    // debugf("]\n");
 
     if (st->wid == 0) die("load_byte(): EOF");
     uint8_t byte = *(st->buf++);
     st->wid--;
-    printf("\t  -> %u [remain=%lu]\n", byte, st->wid);
+    debugf("\t  -> %u [remain=%lu]\n", byte, st->wid);
     return byte;
 }
 
@@ -1372,14 +1382,14 @@ uint64_t load_word(struct ser *st) {
 }
 
 FORCE_INLINE leaf_t load_leaf(struct ser *st) {
-        printf("load_leaf:\n");
+        debugf("load_leaf:\n");
 
         leaf_t result;
 
         uint8_t byt = load_byte(st);
 
         if (byt < 128) {
-                printf("\tSingle-byte leaf: %u\n", byt);
+                debugf("\tSingle-byte leaf: %u\n", byt);
                 uint64_t word = byt;
                 return (leaf_t) {
                         .width_bytes = (word == 0 ? 0 : 1),
@@ -1390,7 +1400,7 @@ FORCE_INLINE leaf_t load_leaf(struct ser *st) {
         uint8_t flag = byt & (1<<6);
         uint8_t len = byt & ((1<<6)-1);
 
-        printf("\tflag=%u len=%u\n", flag, len);
+        debugf("\tflag=%u len=%u\n", flag, len);
 
         if (st->wid < len) {
                 die("load_word(): EOF after length byte");
@@ -1399,18 +1409,18 @@ FORCE_INLINE leaf_t load_leaf(struct ser *st) {
         // Packed Leaf
         if (!flag && len < 9) {
 
-                printf("\tpacked\n");
+                debugf("\tpacked\n");
 
                 uint64_t word = 0;
 
                 for (int i=0; i<len; i++) {
                         uint8_t new_byte = *(st->buf++);
                         uint64_t new = new_byte;
-                        printf("\t\tword = %lu, new= %lu\n", word, new);
+                        debugf("\t\tword = %lu, new= %lu\n", word, new);
                         word |= (new << (8*i));
                 }
 
-                printf("\t\tword = %lu\n", word);
+                debugf("\t\tword = %lu\n", word);
 
                 st->wid -= len;
 
@@ -1421,7 +1431,7 @@ FORCE_INLINE leaf_t load_leaf(struct ser *st) {
 
         // Short indirect leaf, byte indicates length.
         if (!flag) {
-                printf("\tshort indirect\n");
+                debugf("\tshort indirect\n");
                 result.bytes = (uint8_t*) st->buf;
                 result.width_bytes = len;
 
@@ -1431,7 +1441,7 @@ FORCE_INLINE leaf_t load_leaf(struct ser *st) {
                 return result;
         }
 
-        printf("\tlong indirect\n");
+        debugf("\tlong indirect\n");
 
         if (len > 8) die("impossibly big length-of-length\n");
 
@@ -1559,14 +1569,14 @@ load_fragtree(struct frag_loader_state *s) {
         }
 
         if (bit) {
-                printf("cell\n");
+                debugf("cell\n");
                 FragVal res = load_fragment(s);
                 treenode_t tr = alloc_treenode(s->ctx, TAG_PAIR(res.head, res.tail));
                 return (struct load_fragtree_result){ .tree=tr, .leaves=res.leaves };
         }
 
-        printf("leaf\n");
-        printf("refbits=%u\n", refbits);
+        debugf("leaf\n");
+        debugf("refbits=%u\n", refbits);
 
         //      -   Read n bits.
         //      -   n is the bit-width of the maximum backref at this point.
@@ -1574,10 +1584,10 @@ load_fragtree(struct frag_loader_state *s) {
 
         uint32_t leaf = (s->acc >> s->red) & leaf_mask;
 
-        printf("acc=%u red=%lu | mask=%u leaf=%u\n", s->acc, s->red, leaf_mask, leaf);
+        debugf("acc=%u red=%lu | mask=%u leaf=%u\n", s->acc, s->red, leaf_mask, leaf);
 
         int oldred = s->red;
-        printf("[[refbits=%d oldred=%d]]\n", refbits, oldred);
+        debugf("[[refbits=%d oldred=%d]]\n", refbits, oldred);
 
         s->red += refbits;
 
@@ -1591,7 +1601,7 @@ load_fragtree(struct frag_loader_state *s) {
                 uint8_t why = nex & ((1<<extra) - 1);
                 uint8_t more = why << already;
 
-                printf("[[nex=%u extra=%u remain=%u already=%u more=%u why=%u]]\n", nex, extra, remain, already, more, why);
+                debugf("[[nex=%u extra=%u remain=%u already=%u more=%u why=%u]]\n", nex, extra, remain, already, more, why);
 
                 leaf |= more;
 
@@ -1631,14 +1641,14 @@ load_fragtree(struct frag_loader_state *s) {
         copy, we just slice the input buffer.
 */
 void deserialize(Jelly *ctx, struct ser st) {
-        printf("\n");
+        debugf("\n");
 
         uint64_t num_pins = load_word(&st);
 
-        printf("num_pins = %lu\n", num_pins);
+        debugf("num_pins = %lu\n", num_pins);
 
         for (int i=0; i<num_pins; i++) {
-                printf("\tload_pin() [remain=%lu]\n", st.wid);
+                debugf("\tload_pin() [remain=%lu]\n", st.wid);
                 if (st.wid < 32) die("load_pin(): EOF");
                 ctx->pins[alloc_pin(ctx).ix] = (hash256_t*) st.buf;
                 st.buf += 32;
@@ -1646,20 +1656,20 @@ void deserialize(Jelly *ctx, struct ser st) {
         }
 
         uint64_t num_bars = load_word(&st);
-        printf("num_bars = %lu\n", num_bars);
+        debugf("num_bars = %lu\n", num_bars);
         for (int i=0; i<num_bars; i++) {
                 ctx->bars[alloc_bar(ctx).ix] = load_leaf(&st);
         }
 
         uint64_t num_nats = load_word(&st);
 
-        printf("num_nats = %lu\n", num_nats);
+        debugf("num_nats = %lu\n", num_nats);
         for (int i=0; i<num_nats; i++) {
                 ctx->nats[alloc_nat(ctx).ix] = load_leaf(&st);
         }
 
         uint64_t num_frags = load_word(&st);
-        printf("num_nats = %lu\n", num_nats);
+        debugf("num_nats = %lu\n", num_nats);
 
         if (num_frags) {
                 uint8_t acc = *st.buf++;
@@ -1683,12 +1693,28 @@ void deserialize(Jelly *ctx, struct ser st) {
 
                         FragVal fv = load_fragment(&s);
                         frag_t frag = alloc_frag(ctx, fv);
-                        printf("loaded frag %u\n", frag.ix);
+                        debugf("loaded frag %u\n", frag.ix);
                 }
+        } else {
+                uint32_t num_leaves = num_pins + num_bars + num_nats;
+
+                if (num_leaves == 0) {
+                        die("No pins and no leaves.\n");
+                }
+
+                if (num_leaves > 1) {
+                        die("No frags, but multiple leaves.\n");
+                }
+
+                treenode_value v;
+                if (num_pins) { v = TAG_PIN((pin_t){0}); }
+                else if (num_bars) { v = TAG_BAR((bar_t){0}); }
+                else { v = TAG_NAT((nat_t){0}); }
+                alloc_treenode(ctx, v);
         }
 
         if (st.wid != 0) {
-                printf("EXTRA STUFF!\n");
+                debugf("EXTRA STUFF %u bytes unread!\n", st.wid);
         }
 }
 
@@ -1716,14 +1742,14 @@ uint64_t pack_bytes_msb(size_t width, char *bytes) {
 }
 
 uint64_t pack_bytes_lsb(size_t width, char *bytes) {
-        printf("\t\tpack_bytes_lsb(width=%lu, ", width);
+        debugf("\t\tpack_bytes_lsb(width=%lu, ", width);
         uint64_t res = 0;
         for (int i=0; i<width; i++) {
                 uint64_t tmp = bytes[i];
-                printf("%02lx(%d)", tmp, i*8);
+                debugf("%02lx(%d)", tmp, i*8);
                 res = res | (tmp << (i*8));
         }
-        printf(")\n");
+        debugf(")\n");
         return res;
 }
 
@@ -1774,17 +1800,17 @@ leaf_t read_hex() {
 }
 
 uint64_t read_word(uint64_t acc) {
-        // printf("read_word(%lu)\n", acc);
-        printf("read_word()\n");
+        // debugf("read_word(%lu)\n", acc);
+        debugf("read_word()\n");
         int c;
 
         while (isdigit(c = getchar())) {
-                // printf("\t    acc=%lu\t('%c' is a digit)\n", acc, c);
+                // debugf("\t    acc=%lu\t('%c' is a digit)\n", acc, c);
                 acc *= 10;
                 acc += (uint64_t)(c - '0');
         }
 
-        // printf("\t    acc=%lu\t('%c' is not a digit)\n", acc, c);
+        // debugf("\t    acc=%lu\t('%c' is not a digit)\n", acc, c);
 
         if (c != EOF) ungetc(c, stdin);
         return acc;
@@ -1820,20 +1846,20 @@ leaf_t read_string() {
         leaf_t leaf;
         leaf.width_bytes = count;
 
-        printf("\tread_string() -> \"%s\" (%lu)\n", buf, count);
-        // printf("read_string()\n");
+        debugf("\tread_string() -> \"%s\" (%lu)\n", buf, count);
+        // debugf("read_string()\n");
 
 
         if (count < 9) {
                 leaf.bytes = (uint8_t*) pack_bytes_lsb(count, buf);
-                printf("\t\t(direct)\n");
+                debugf("\t\t(direct)\n");
         } else {
                 leaf.bytes = calloc(count+1, 1);
                 memcpy(leaf.bytes, buf, count);
-                printf("\t\t(indirect)\n");
+                debugf("\t\t(indirect)\n");
         }
 
-        printf("\t\t(width=%d)\n", leaf.width_bytes);
+        debugf("\t\t(width=%d)\n", leaf.width_bytes);
         free(buf);
         return leaf;
 
@@ -2099,7 +2125,7 @@ int fragment_depth(Jelly *ctx, FragVal frag) {
 }
 
 void jelly_debug_leaves(Jelly *ctx, bool details) {
-        printf("\n\tleaves: (width=%u, count=%u)\n\n",
+        debugf("\n\tleaves: (width=%u, count=%u)\n\n",
                ctx->leaves_table_width,
                ctx->leaves_table_count);
 
@@ -2113,26 +2139,26 @@ void jelly_debug_leaves(Jelly *ctx, bool details) {
                 // Empty slot
                 if (ent.pointer.ix == UINT32_MAX) continue;
 
-                printf("\t\t%4d = ", i);
+                debugf("\t\t%4d = ", i);
                 print_tree_outline(ctx, ent.pointer);
-                printf("\t(val=");
+                debugf("\t(val=");
                 print_tree(ctx, ent.pointer);
-                printf(")\n");
+                debugf(")\n");
 
                 if (details) {
                         uint64_t width = ((ent.width.word << 2) >> 2);
                         uint64_t bin = ent.hash & mask;
                         uint64_t distance = (((uint64_t)i) - bin);
-                        printf("\t\t    bytes: %-4lu\n", width);
-                        printf("\t\t    bin: %lu [dist=%lu]\n", bin, distance);
-                        printf("\t\t    hash: 0x%016lx\n", ent.hash);
+                        debugf("\t\t    bytes: %-4lu\n", width);
+                        debugf("\t\t    bin: %lu [dist=%lu]\n", bin, distance);
+                        debugf("\t\t    hash: 0x%016lx\n", ent.hash);
                 }
         }
 }
 
 
 void jelly_debug_interior_nodes(Jelly *ctx) {
-        printf("\n\tinterior_nodes_table: (width=%u, count=%u)\n\n",
+        debugf("\n\tinterior_nodes_table: (width=%u, count=%u)\n\n",
                ctx->nodes_table_width,
                ctx->nodes_table_count);
 
@@ -2149,63 +2175,65 @@ void jelly_debug_interior_nodes(Jelly *ctx) {
                 uint64_t bin = ent.hash & mask;
                 uint64_t distance = (((uint64_t)i) - bin);
 
-                printf("\t\t%4d = t%u\tbin=%lu\tdist=%lu\thash=%08x\n", i, ent.pointer.ix, bin, distance, ent.hash);
+                debugf("\t\t%4d = t%u\tbin=%lu\tdist=%lu\thash=%08x\n", i, ent.pointer.ix, bin, distance, ent.hash);
 
-                // printf("\n\n\t\t  ");
+                // debugf("\n\n\t\t  ");
                 // print_tree(ctx, ent.pointer);
                 // print_tree_outline(ctx, ent.pointer);
-                // printf("\n\n");
+                // debugf("\n\n");
         }
 }
 
 
 void jelly_debug(Jelly *ctx) {
-        printf("\njelly_debug():\n");
+        if (!DEBUG) return;
+
+        debugf("\njelly_debug():\n");
 
         jelly_debug_leaves(ctx, false);
 
         jelly_debug_interior_nodes(ctx);
 
         {
-                printf("\n\tpins: (width=%u, count=%u)\n\n",
+                debugf("\n\tpins: (width=%u, count=%u)\n\n",
                        ctx->pins_width,
                        ctx->pins_count);
                 int num = ctx->pins_count;
                 for (int i=0; i<num; i++) {
-                        printf("\t\tp%d = ", i);
+                        debugf("\t\tp%d = ", i);
                         print_pin(ctx, (pin_t){ .ix = i });
-                        printf("\n");
+                        debugf("\n");
                 }
         }
 
 
         {
-                printf("\n\tbars: (width=%u, count=%u)\n\n",
+                debugf("\n\tbars: (width=%u, count=%u)\n\n",
                        ctx->bars_width,
                        ctx->bars_count);
                 int num = ctx->bars_count;
                 for (int i=0; i<num; i++) {
-                        printf("\t\tb%d = ", i);
+                        debugf("\t\tb%d = ", i);
                         print_bar(ctx, (bar_t){ .ix = i });
-                        printf("\n");
+                        debugf("\n");
                 }
         }
 
 
         {
-                printf("\n\tnats: (width=%u, count=%u)\n\n",
+                debugf("\n\tnats: (width=%u, count=%u)\n\n",
                        ctx->nats_width,
                        ctx->nats_count);
                 int num = ctx->nats_count;
                 for (int i=0; i<num; i++) {
-                        printf("\t\tn%d = ", i);
+                        debugf("\t\tn%d = ", i);
                         print_nat(ctx, (nat_t){ .ix = i });
-                        printf("\n");
+                        debugf("\n");
                 }
         }
 
         {
-                printf("\n\ttreenodes: (width=%u, count=%u)\n\n",
+                debugf("\n\ttreenodes: (width=%u, count=%u)\n\n",
                        ctx->treenodes_width,
                        ctx->treenodes_count);
                 int num = ctx->treenodes_count;
@@ -2213,40 +2241,61 @@ void jelly_debug(Jelly *ctx) {
                         treenode_value val = ctx->treenodes[i];
                         switch (val.word >> 61) {
                             case 4:
-                                printf("\t\tt%d = p%u\n", i, (uint32_t) val.word);
+                                debugf("\t\tt%d = p%u\n", i, (uint32_t) val.word);
                                 continue;
                             case 5:
-                                printf("\t\tt%d = b%u\n", i, (uint32_t) val.word);
+                                debugf("\t\tt%d = b%u\n", i, (uint32_t) val.word);
                                 continue;
                             case 6:
-                                printf("\t\tt%d = n%u\n", i, (uint32_t) val.word);
+                                debugf("\t\tt%d = n%u\n", i, (uint32_t) val.word);
                                 continue;
                             case 7:
-                                printf("\t\tt%d = f%u\n", i, (uint32_t) val.word);
+                                debugf("\t\tt%d = f%u\n", i, (uint32_t) val.word);
                                 continue;
                             default: {
                                 treenode_t hed = NODEVAL_HEAD(val);
                                 treenode_t tel = NODEVAL_TAIL(val);
-                                printf("\t\tt%d = (%u, %u)\n", i, hed.ix, tel.ix);
+                                debugf("\t\tt%d = (%u, %u)\n", i, hed.ix, tel.ix);
                                 continue;
                             }
                         }
                 }
         }
 
-        printf("\nJelly Fragments:\n\n");
+        debugf("\nJelly Fragments:\n\n");
 
         uint32_t count = ctx->frags_count;
         for (int i=0; i<count; i++) {
                 FragVal cur = ctx->frags[i];
                 int depth = fragment_depth(ctx, cur);
-                printf("\tFragment[%d]: (depth=%d)\n\n\t\t(t%d, t%d) = ", i, depth, cur.head.ix, cur.tail.ix);
+                debugf("\tFragment[%d]: (depth=%d)\n\n\t\t(t%d, t%d) = ", i, depth, cur.head.ix, cur.tail.ix);
                 print_fragment_outline(ctx, (frag_t){i});
 
-                printf("\n\n\t\t    ");
+                debugf("\n\n\t\t    ");
                 print_fragment(ctx, (frag_t){i});
-                printf("\n\n");
+                debugf("\n\n");
         }
+}
+
+void jelly_print(Jelly *ctx) {
+        uint32_t frags = ctx->frags_count;
+
+        if (frags) {
+                print_fragment(ctx, (frag_t){ .ix = (frags-1) });
+        } else {
+
+                if (!ctx->treenodes_count) {
+                        die("No frags and no leaves\n");
+                }
+
+                if (ctx->treenodes_count > 1) {
+                        die("No frags but %d leaves.  Nonsense!\n", ctx->treenodes_count);
+                }
+
+                print_tree(ctx, (treenode_t){0});
+        }
+
+        putchar('\n');
 }
 
 
@@ -2263,24 +2312,26 @@ int main () {
         // tmp = jelly_pin(ctx, &dumb_hash_2);
         // top = jelly_cons(ctx, tmp, top);
 
-        printf("# Shatter\n");
+        debugf("# Shatter\n");
 
         shatter(ctx, top, true);
 
         jelly_debug(ctx);
 
-        printf("# Serialize\n");
+        debugf("# Serialize\n");
 
         struct ser ser = serialize(ctx);
 
-        printf("# Clean Slate\n");
+        debugf("# Clean Slate\n");
         wipe_jelly_ctx(ctx);
         // jelly_debug(ctx);
 
-        printf("# De-serialize\n");
+        debugf("# De-serialize\n");
         deserialize(ctx, ser);
 
         jelly_debug(ctx);
+
+        jelly_print(ctx);
 
         free(ser.buf);
         free_jelly_ctx(ctx);

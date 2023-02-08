@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+
+# TODO: This breaks at -O3, probably undefined behavior?
+
+make
+
+./a.out < test.sexp > test.tmp
+
+if test 0 -ne $(diff test.tmp test.out | wc -l)
+then
+    echo "test.tmp does not match test.out (round 1)"
+fi
+
+./a.out < test.out > test.tmp
+
+if test 0 -ne $(diff test.tmp test.out | wc -l)
+then
+    echo "test.tmp does not match test.out (round 2)"
+fi
+
+time for n in $(seq 999)
+     do
+         i="$n"
+         o="$(echo "$i" | ./a.out)"
+         if test "$o" != "$i"
+         then
+             echo "'$i' != '$o'"
+         fi
+     done
+
+time for n in $(seq 999)
+     do
+         i="($n $n ($n $n))"
+         o="$(echo "$i" | ./a.out)"
+         if test "$o" != "$i"
+         then
+             echo "'$i' != '$o'"
+         fi
+     done
+
+time for n in $(seq 999)
+     do
+         i="($n $n ($n $n) ($n $n ($n $n)))"
+         o="$(echo "$i" | ./a.out)"
+         if test "$o" != "$i"
+         then
+             echo "'$i' != '$o'"
+         fi
+     done
