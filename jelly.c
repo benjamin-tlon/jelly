@@ -1534,10 +1534,10 @@ INLINE leaf_t load_leaf(struct ser *st) {
 
 struct frag_loader_state {
         Jelly *ctx;
-        uint8_t *buf; // Pointer into the remaining bytes.
-        uint64_t wid; // Remaining bytes in the buffer.
-        uint8_t acc;  // The last byte read from the buffer.
-        uint64_t red; // The number of bits of `acc` that have been consumed.
+        uint64_t *ptr; // Pointer into the remaining words.
+        uint64_t rem;  // Remaining words in the buffer.
+        uint64_t acc;  // The last word read from the buffer.
+        uint64_t red;  // The number of bits of `acc` that have been consumed.
 
         uint64_t ref_bits; // The number of bits per leaf
         uint64_t max_ref;  // The maximum ref that we can accept;
@@ -1586,13 +1586,22 @@ struct load_fragtree_result
 load_fragtree(struct frag_loader_state *s) {
         int refbits = s->ref_bits;
 
-        uint8_t bit = (s->acc & (1 << s->red));
+        showbits("mor", 64, (64-s->red), (s->acc >> s->red)); putchar('\n');
 
-        s->red = (s->red + 1) % 8;
+        uint64_t bit = (s->acc >> s->red) & 1;
+
+        s->red = (s->red + 1) % 64;
+
+        showbits("bit", 1, 1, bit); putchar('\n');
+        showbits("mor", 64, (64-s->red), (s->acc >> s->red)); putchar('\n');
+
         if (!s->red) {
-                // TODO: WIDTH_CHECK
-                s->acc = *(s->buf)++;
+                if (!s->rem) die("Internal error: not enough space\n");
+                s->rem--;
+                s->acc = *(s->ptr)++;
         }
+
+        showbits("mor", 64, (64-s->red), (s->acc >> s->red)); putchar('\n');
 
         if (bit) {
                 debugf("cell\n");
@@ -1606,38 +1615,39 @@ load_fragtree(struct frag_loader_state *s) {
 
         //      -   Read n bits.
         //      -   n is the bit-width of the maximum backref at this point.
-        uint32_t leaf_mask = (1 << refbits) - 1;
+        uint64_t leaf_mask = (1 << refbits) - 1;
 
-        uint32_t leaf = (s->acc >> s->red) & leaf_mask;
+        uint64_t leaf = (s->acc >> s->red) & leaf_mask;
 
-        debugf("acc=%u red=%lu | mask=%u leaf=%u\n", s->acc, s->red, leaf_mask, leaf);
+        debugf("acc=%lu red=%lu | mask=%lu leaf=%lu\n", s->acc, s->red, leaf_mask, leaf);
 
         int oldred = s->red;
         debugf("[[refbits=%d oldred=%d]]\n", refbits, oldred);
 
         s->red += refbits;
 
-        if (s->red >= 8) {
-                int extra   = (oldred + refbits) - 8;
-                int remain  = 8-extra;
+        if (s->red >= 64) {
+                int extra   = (oldred + refbits) - 64;
+                int remain  = 64-extra;
                 int already = refbits - extra;
 
-                uint8_t nex = s->buf[0];
+                uint64_t nex = s->ptr[0];
 
-                uint8_t why = nex & ((1<<extra) - 1);
-                uint8_t more = why << already;
+                uint64_t why = nex & ((1<<extra) - 1);
+                uint64_t more = why << already;
 
-                debugf("[[nex=%u extra=%u remain=%u already=%u more=%u why=%u]]\n", nex, extra, remain, already, more, why);
+                debugf("[[nex=%lu extra=%d remain=%d already=%d more=%lu why=%lu]]\n", nex, extra, remain, already, more, why);
 
                 leaf |= more;
 
-                s->red -= 8;
+                s->red -= 64;
                 s->acc = nex;
-                s->buf++;
+                s->rem--;
+                s->ptr++;
         }
 
         if (leaf > s->max_ref) {
-                die("leaf val is out-of-bounds\n");
+                die("leaf val is out-of-bounds (%lu)\n", leaf);
         }
 
         treenode_value v = decode_leaf(s, leaf);
@@ -1652,6 +1662,8 @@ load_fragtree(struct frag_loader_state *s) {
         copy, we just slice the input buffer.
 */
 void deserialize(Jelly *ctx, struct ser st) {
+        char *top = st.buf;
+
         if (st.wid % 8) {
                 die("Input buffer must contain a multiple of 8 bytes.\n");
         }
@@ -1686,14 +1698,42 @@ void deserialize(Jelly *ctx, struct ser st) {
         uint64_t num_frags = load_word(&st);
         debugf("num_nats = %lu\n", num_nats);
 
+        debugf("num_nats = %lu\n", num_nats);
+
         if (num_frags) {
-                uint8_t acc = *st.buf++;
+
+                int used = (st.buf - top);
+                int clif = used % 8;
+
+                // TODO This is probably wrong where (used % 8)!=0
+                if (st.wid < (8 - clif)) {
+                        die("Internal error: not enough bits remain to serialize frags\n");
+                }
+
+                uint64_t red, acc, *ptr, rem;
+
+                // If reading the leaves left us in a place where we
+                // are not word-aligned, then bump the pointer back to
+                // the start of the last word.  We start reading the
+                // accumulator at the bit-offset `red`, so this doesn't
+                // add any junk to the results.
+                st.buf -= clif;
+                st.wid += clif;
+
+                debugf("\tst.wid = %lu\n", st.wid);
+                debugf("\tst.buf = 0x%lx\n", (uint64_t) st.buf);
+
+                red = clif * 8;
+                ptr = (uint64_t*) st.buf;
+                acc = *ptr++;
+                rem = (st.wid / 8) - 1;
 
                 struct frag_loader_state s = {
                         .ctx = ctx,
-                        .buf = (uint8_t*) st.buf,
+                        .ptr = ptr,
                         .acc = acc,
-                        .red = 0,
+                        .red = red,
+                        .rem = rem,
                         .ref_bits = 0,
                         .max_ref = 0,
                         .num_pins = num_pins,
@@ -1706,10 +1746,35 @@ void deserialize(Jelly *ctx, struct ser st) {
                         s.max_ref  = num_refs - 1;
                         s.ref_bits = word64_bits(s.max_ref);
 
+                        debugf("\t[frag_loader_state]\n");
+                        debugf("\tptr = 0x%016lx\n", (uint64_t) s.ptr);
+
+                        debugf("       "); showbits("acc", 64, 64, s.acc); putchar('\n');
+                        debugf("       "); showbits("mor", 64, (64-s.red), (s.acc >> s.red)); putchar('\n');
+                        debugf("\tred = %lu\n", s.red);
+                        debugf("\trem = %lu\n", s.rem);
+                        debugf("\tref_bits = %lu\n", s.ref_bits);
+                        debugf("\tmax_ref = %lu\n", s.max_ref);
+                        debugf("\tnum_pins = %lu\n", s.num_pins);
+                        debugf("\tnum_bars = %lu\n", s.num_bars);
+                        debugf("\tnum_nats = %lu\n", s.num_nats);
+
                         FragVal fv = load_fragment(&s);
                         frag_t frag = alloc_frag(ctx, fv);
                         debugf("loaded frag %u\n", frag.ix);
                 }
+
+                if (s.rem != 0) {
+                        showbits("mor", 64, (64-s.red), (s.acc >> s.red)); putchar('\n');
+                        showbits("mor", 64, 64, s.ptr[1]); putchar('\n');
+                        die("EXTRA STUFF %lu words unread!\n", s.rem);
+                }
+
+                if (s.acc >> s.red) {
+                        showbits("mor", 64, (64-s.red), (s.acc >> s.red)); putchar('\n');
+                        die("EXTRA BITS unread in last word: %lx\n", (s.acc >> s.red));
+                }
+
         } else {
                 uint32_t num_leaves = num_pins + num_bars + num_nats;
 
@@ -1726,10 +1791,10 @@ void deserialize(Jelly *ctx, struct ser st) {
                 else if (num_bars) { v = TAG_BAR((bar_t){0}); }
                 else { v = TAG_NAT((nat_t){0}); }
                 alloc_treenode(ctx, v);
-        }
 
-        if (st.wid != 0) {
-                debugf("EXTRA STUFF %lu bytes unread!\n", st.wid);
+                if (st.wid != 0) {
+                        debugf("EXTRA STUFF %lu bytes unread!\n", st.wid);
+                }
         }
 }
 
@@ -2336,15 +2401,15 @@ void jelly_print(Jelly *ctx) {
 int main () {
         Jelly *ctx = new_jelly_ctx();
 
-        hash256_t dumb_hash_1 = { fmix64(111111), fmix64(65535), fmix64(9),  65536 };
-        hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
+        // hash256_t dumb_hash_1 = { fmix64(111111), fmix64(65535), fmix64(9),  65536 };
+        // hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
         treenode_t top = read_many(ctx);
-        treenode_t tmp = jelly_pin(ctx, &dumb_hash_1);
-        top = jelly_cons(ctx, tmp, top);
-        tmp = jelly_pin(ctx, &dumb_hash_1);
-        top = jelly_cons(ctx, tmp, top);
-        tmp = jelly_pin(ctx, &dumb_hash_2);
-        top = jelly_cons(ctx, tmp, top);
+        // treenode_t tmp = jelly_pin(ctx, &dumb_hash_1);
+        // top = jelly_cons(ctx, tmp, top);
+        // tmp = jelly_pin(ctx, &dumb_hash_1);
+        // top = jelly_cons(ctx, tmp, top);
+        // tmp = jelly_pin(ctx, &dumb_hash_2);
+        // top = jelly_cons(ctx, tmp, top);
 
         debugf("# Shatter\n");
 
