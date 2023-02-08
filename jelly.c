@@ -1996,12 +1996,15 @@ void print_bar(Jelly *ctx, bar_t bar) {
         printf("\"");
 }
 
+char ppbuf[256] = {0};
+
 size_t print_pin(Jelly *ctx, pin_t pin) {
-        hash256_t h = *(ctx->pins[pin.ix]);
-        char tmp[256];
+        char *hash_bytes = (char*) ctx->pins[pin.ix];
         size_t output_size;
-        b58enc(tmp, &output_size, &h, 32);
-        printf("%s", tmp);
+        b58enc(ppbuf, &output_size, hash_bytes, 32);
+        putchar('[');
+        fwrite(ppbuf, 1, output_size, stdout);
+        putchar(']');
         return output_size;
 }
 
@@ -2306,15 +2309,15 @@ void jelly_print(Jelly *ctx) {
 int main () {
         Jelly *ctx = new_jelly_ctx();
 
-        // hash256_t dumb_hash_1 = { fmix64(111111), fmix64(65535), fmix64(9),  65536 };
-        // hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
+        hash256_t dumb_hash_1 = { fmix64(111111), fmix64(65535), fmix64(9),  65536 };
+        hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
         treenode_t top = read_some(ctx);
-        // treenode_t tmp = jelly_pin(ctx, &dumb_hash_1);
-        // top = jelly_cons(ctx, tmp, top);
-        // tmp = jelly_pin(ctx, &dumb_hash_1);
-        // top = jelly_cons(ctx, tmp, top);
-        // tmp = jelly_pin(ctx, &dumb_hash_2);
-        // top = jelly_cons(ctx, tmp, top);
+        treenode_t tmp = jelly_pin(ctx, &dumb_hash_1);
+        top = jelly_cons(ctx, tmp, top);
+        tmp = jelly_pin(ctx, &dumb_hash_1);
+        top = jelly_cons(ctx, tmp, top);
+        tmp = jelly_pin(ctx, &dumb_hash_2);
+        top = jelly_cons(ctx, tmp, top);
 
         debugf("# Shatter\n");
 
