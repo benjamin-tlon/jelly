@@ -9,7 +9,7 @@
 #include "xxh3.h"
 #include "libbase58.h"
 
-#define DEBUG 0
+#define DEBUG 1
 
 #if DEBUG
 #define debugf(...) printf(__VA_ARGS__)
@@ -975,7 +975,7 @@ void word_dump(uint8_t **ptr, uint64_t word) {
         } else {
                 uint8_t width = (uint8_t) word64_bytes(word);
 
-                uint8_t tagged_width = width | (2<<6); // 0b10xxxxxx
+                uint8_t tagged_width = width | 0b10000000;
 
                 debugf("\tword_dump: width = %u\n", width);
                 debugf("\tword_dump: tagged_width = %u\n", tagged_width);
@@ -985,7 +985,7 @@ void word_dump(uint8_t **ptr, uint64_t word) {
                 // TODO Can I use memcpy here?
                 for (int i=0; i<width; i++) {
                         uint8_t byte = word;
-                        debugf("\tword_dump: byte[%d] = %u (rest=%lu)\n", i, byte, word);
+                        debugf("\tword_dump: byte[%d] = %u (rest=%lu)\n", i, byte, (word>>8));
                         *buf++ = byte;
                         word = word >> 8;
                 }
@@ -1269,6 +1269,7 @@ struct ser serialize(Jelly *ctx) {
 
         // Dumping Leaves
 
+        debugf("numpins = %u\n", numpins);
         word_dump(&out, numpins);
         for (int i=0; i<numpins; i++) {
                 debugf("p%d\n", i);
@@ -1277,18 +1278,21 @@ struct ser serialize(Jelly *ctx) {
                 out += 32;
         }
 
+        debugf("numbars = %u\n", numbars);
         word_dump(&out, numbars);
         for (int i=0; i<numbars; i++) {
                 debugf("b%d\n", i);
                 out = dump_leaf(out, ctx->bars[i]);
         }
 
+        debugf("numnats = %u\n", numnats);
         word_dump(&out, numnats);
         for (int i=0; i<numnats; i++) {
                 debugf("n%d\n", i);
                 out = dump_leaf(out, ctx->nats[i]);
         }
 
+        debugf("numfrags = %u\n", numfrags);
         word_dump(&out, numfrags);
 
         uint64_t maxdepth = 128; // TODO
@@ -1358,27 +1362,47 @@ FORCE_INLINE uint8_t load_byte(struct ser *st) {
 uint64_t load_word(struct ser *st) {
     uint8_t byt = load_byte(st);
 
+    // If the high-bit is zero, this is a direct byte.
     if (byt < 128) {
             return (uint64_t) byt;
     }
 
-    uint8_t flag = byt & (1<<6);
-    uint8_t len = byt & ((1<<6)-1);
+    // The low six bits indicates the length, either the length
+    // byte-array, or the length of the length of the byte-array.
+    uint8_t len = byt & 0x00111111;
 
-    if (flag || len > 8) {
-            die("load_word(): length-byte is too big");
+    // What about the second-highest bit?  If that bit is set, then `len`
+    // is the length of the length-word, otherwise it indicates the
+    // number of bytes used to render the word itself.
+    uint8_t flag = byt & (1<<6);
+
+    if (flag) {
+        die("load_word(): Number has a length-of-length, "
+            "which is impossible for something that fits "
+            "in 8 bytes\n");
+    }
+
+    if (len > 8) {
+            die("load_word(): length-byte is too big (len=%u)", len);
     }
 
     if (st->wid < len) {
             die("load_word(): EOF after length byte");
     }
 
+    debugf("\tlen=%u\n", len);
+
     uint64_t result = 0;
 
     for (int i=0; i<len; i++) {
-            uint64_t new = *(st->buf++);
-            result |= (new << (8*i));
+            debugf("\tresult = %lu\n", result);
+            uint8_t byte = *(st->buf++);
+            uint64_t new = byte;
+            new <<= 8 * i;
+            result |= new;
     }
+
+    debugf("\tresult = %lu\n", result);
 
     st->wid -= len;
 
@@ -1718,7 +1742,7 @@ void deserialize(Jelly *ctx, struct ser st) {
         }
 
         if (st.wid != 0) {
-                debugf("EXTRA STUFF %u bytes unread!\n", st.wid);
+                debugf("EXTRA STUFF %lu bytes unread!\n", st.wid);
         }
 }
 
@@ -1757,10 +1781,14 @@ uint64_t pack_bytes_lsb(size_t width, char *bytes) {
         return res;
 }
 
+treenode_t read_leaf(Jelly*);
+
 treenode_t read_one(Jelly*);
 treenode_t read_many(Jelly*, treenode_t);
 treenode_t read_some(Jelly*);
 
+// TODO: Instead of reading pairs, use an accumulator byte like when
+// we bit-deserialize.
 leaf_t read_hex() {
         size_t count=0, wid=256;
         char tmp[256], *buf=tmp;
@@ -1873,6 +1901,18 @@ treenode_t read_some(Jelly *ctx) {
         return read_many(ctx, read_one(ctx));
 }
 
+void read_line_comment() {
+    loop:
+        char c = getchar();
+        switch (c) {
+            case EOF:
+            case '\n':
+                return;
+            default:
+                goto loop;
+        }
+}
+
 treenode_t read_many(Jelly *ctx, treenode_t acc) {
     loop:
         int c = getchar();
@@ -1889,6 +1929,9 @@ treenode_t read_many(Jelly *ctx, treenode_t acc) {
             case EOF:
             case ')':
                 return acc;
+            case '#':
+                read_line_comment();
+                goto loop;
             case ' ':
             case '\n':
             case '\r':
@@ -1925,21 +1968,48 @@ treenode_t read_many(Jelly *ctx, treenode_t acc) {
         }
 }
 
-
-treenode_t read_one(Jelly *ctx) {
-        int c = getchar();
-    loop:
-        if (isdigit(c)) {
-                uint64_t word = read_word((uint64_t)(c - '0'));
-                uint32_t width = word64_bytes(word);
-                return jelly_packed_nat(ctx, width, word);
-        }
+treenode_t read_leaf(Jelly *ctx) {
+        char c = getchar();
 
         switch (c) {
             case '"':
                 return jelly_bar(ctx, read_string());
+            case '[':
+                die("TODO: Parse pins\n");
+            case '0': {
+                char d = getchar();
+                if (d == 'x') {
+                        return jelly_nat(ctx, read_hex());
+                }
+                ungetc(d, stdin);
+            } // fallthrough
+            case '1':
+            case '2':
+            case '3':
+            case '4':
+            case '5':
+            case '6':
+            case '7':
+            case '8':
+            case '9':
+                uint64_t word = read_word((uint64_t)(c - '0'));
+                uint32_t width = word64_bytes(word);
+                return jelly_packed_nat(ctx, width, word);
+            default:
+                die("Not a leaf: '%c'\n", c);
+        }
+}
+
+
+treenode_t read_one(Jelly *ctx) {
+        int c = getchar();
+    loop:
+        switch (c) {
             case '(':
                 return read_many(ctx, read_one(ctx));
+            case '#':
+                read_line_comment();
+                goto loop;
             case ' ':
             case '\n':
             case '\r':
@@ -1948,7 +2018,8 @@ treenode_t read_one(Jelly *ctx) {
             case EOF:
                 die("Unexpected EOF (read_one)\n");
             default:
-                die("Unexpected character: %c (read_one)\n", c);
+                ungetc(c, stdin);
+                return read_leaf(ctx);
         }
 }
 
