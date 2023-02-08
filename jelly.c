@@ -57,24 +57,28 @@ size_t hash_combine(uint64_t x, uint64_t y) {
 
 #define die(...) (fprintf(stderr, __VA_ARGS__),exit(1))
 
-// TODO: Testing.
-FORCE_INLINE uint32_t word64_bits (uint64_t w) {
+/*
+        We explicitly handle the 0 cases, since __builtin_clzll is
+        undefined in this situation.
+*/
+FORCE_INLINE int word64_bits (uint64_t w) {
+        if (!w) { return 0; }
         return 64 - __builtin_clzll(w);
 }
 
 /*
-        What is the byte-width of a 64-bit word?
+        0   -> 0
+        1   -> 1 byte
+        127 -> 1 byte
+        256 -> 2 bytes
 
-        For example: 0 takes 0 bytes, 127 takes 1 byte, 256 takes two
-        bytes, etc.
-
-        TODO: This should return 0 for 0, but it seems to return 1.
 */
 uint32_t word64_bytes (uint64_t w) {
         uint32_t bits = word64_bits(w);
-        return (bits/8) + !!(bits%8);
+        uint32_t aligned = bits/8;
+        if (bits%8) return aligned + 1;
+        return aligned;
 }
-
 
 
 // Types ///////////////////////////////////////////////////////////////////////
