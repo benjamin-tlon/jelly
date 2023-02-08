@@ -1250,10 +1250,6 @@ struct ser serialize(Jelly *ctx) {
         // Add in the tree bits;
         width += (treebits/8);
 
-        debugf("total_byte_width = %lu\n", width);
-
-        size_t total_byte_width = width;
-
         // Result is always a multiple of 8 (so we can treat it as an
         // array of 64-bit words);
         uint64_t hanging_bytes = width % 8;
@@ -1261,7 +1257,7 @@ struct ser serialize(Jelly *ctx) {
 
         debugf("padded byte width = %lu\n", width);
 
-        struct ser result = (struct ser) { .buf = calloc(1, width), .wid = total_byte_width };
+        struct ser result = (struct ser) { .buf = calloc(1, width), .wid = width };
 
         // Dumping
 
@@ -1568,19 +1564,21 @@ FragVal load_fragment(struct frag_loader_state *s) {
 }
 
 treenode_value decode_leaf(struct frag_loader_state *s, uint32_t leaf) {
-        if (leaf < s->num_pins) return TAG_PIN((pin_t){leaf});
-
+        if (leaf < s->num_pins) {
+                return TAG_PIN((pin_t){leaf});
+        }
         leaf -= s->num_pins;
+
         if (leaf < s->num_bars) {
                 return TAG_BAR((bar_t){leaf});
         }
-
         leaf -= s->num_bars;
+
         if (leaf < s->num_nats) {
                 return TAG_NAT((nat_t){leaf});
         }
-
         leaf -= s->num_nats;
+
         return TAG_FRAG((frag_t){leaf});
 }
 
@@ -1592,7 +1590,7 @@ load_fragtree(struct frag_loader_state *s) {
 
         s->red = (s->red + 1) % 8;
         if (!s->red) {
-                // WIDTH_CHECK
+                // TODO: WIDTH_CHECK
                 s->acc = *(s->buf)++;
         }
 
@@ -1647,21 +1645,6 @@ load_fragtree(struct frag_loader_state *s) {
         treenode_t t = alloc_treenode(s->ctx, v);
 
         return (struct load_fragtree_result){ .tree = t, .leaves = 0 };
-
-/*
-                -   Use the resulting word, to construct a TreeVal.
-
-                    Can we do better than the following?
-
-                        if (bits < num_pins) return TAG_PIN(bits);
-                        bits -= num_pins
-                        if (bits < num_bars) return TAG_BAR(bits);
-                        bits -= num_bars;
-                        if (bits < num_nats) return TAG_NAT(bits);
-                        bits -= num_nats;
-                        return TAG_FRAG(bits);
-
-*/
 }
 
 /*
@@ -1669,6 +1652,10 @@ load_fragtree(struct frag_loader_state *s) {
         copy, we just slice the input buffer.
 */
 void deserialize(Jelly *ctx, struct ser st) {
+        if (st.wid % 8) {
+                die("Input buffer must contain a multiple of 8 bytes.\n");
+        }
+
         debugf("\n");
 
         uint64_t num_pins = load_word(&st);
