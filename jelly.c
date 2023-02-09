@@ -11,58 +11,11 @@
 #include "libbase58.h"
 
 
-// Internal murmur3 stuff //////////////////////////////////////////////////////
-
-#ifdef __GNUC__
-#define INLINE __attribute__((always_inline)) inline
-#else
-#define INLINE inline
-#endif
-
-#define BIG_CONSTANT(x) (x##LLU)
-
-/*
-        Taken from murmur3.  Used to bit-mix direct atoms and
-        shape-signatures.
-*/
-static INLINE uint64_t fmix64 (uint64_t k) {
-        k ^= k >> 33;
-        k *= BIG_CONSTANT(0xff51afd7ed558ccd);
-        k ^= k >> 33;
-        k *= BIG_CONSTANT(0xc4ceb9fe1a85ec53);
-        k ^= k >> 33;
-
-        return k;
-}
-
-/*
-        Taken from stack overflow, derivative of boost::hash_combine,
-        but for 64-bit hashes.
-*/
-size_t hash_combine(uint64_t x, uint64_t y) {
-        x ^= y + BIG_CONSTANT(0x517cc1b727220a95) + (x << 6) + (x >> 2);
-        return x;
-}
-
-
-// Misc Bin ////////////////////////////////////////////////////////////////////
+void print_tree_outline(Jelly, treenode_t);
+void print_tree(Jelly, treenode_t);
 
 
 // Types ///////////////////////////////////////////////////////////////////////
-
-/*
-    "deks" are temporary `FanEntry`s used while building up a tree to
-    be serialized.
-
-    Pins : Map Hash256 Offset    <<  64 bits (word32 hash_fragment, word32 offset)
-    Word : Map Word Offset       << 128 bits (word64 word, word64 offset)
-    Nats : Map Natural Offset    << 192 bits (word64 leaves_hash, word64 length, word32 pointer)
-    Bars : Map ByteString Offset << 192 bits (word64 leaves_hash, word64 length, word32 pointer)
-*/
-
-typedef struct hash256 {
-    uint64_t a, b, c, d;
-} hash256_t;
 
 typedef struct {
         treenode_t head;
@@ -74,14 +27,6 @@ typedef struct treenode_value {
         uint64_t word;
 } treenode_value;
 
-typedef struct {
-    treenode_value val;   // (Word32, Word32)
-    uint32_t hash;        // Bit mixed + truncated version of `val.word`
-    treenode_t pointer;   // If this is in a `desks` freelist,
-                          // then this is instead an index into the
-                          // desks array.
-} FanEntry;
-
 typedef struct word_entry {
         uint64_t value;
         nat_t    index;
@@ -92,20 +37,37 @@ typedef struct word_entry {
     11xx.. indicates a bar
     0xxx.. indicates a nat
 */
-typedef struct tagged_width {
-        uint64_t word;
-} tagged_width_t;
+typedef struct tagged_width { uint64_t word; } tagged_width_t;
+
+/*
+        A row in the nodes_table hash table.
+
+        It's empty if val.ent.word == UINT64_MAX
+
+        TODO Should we use pointer.ix == UINT32_MAX instead, for
+        consistency?
+*/
+typedef struct {
+    treenode_value val;   // (Word32, Word32)
+    uint32_t hash;        // Bit mixed + truncated version of `val.word`
+    treenode_t pointer;   // If this is in a `desks` freelist,
+                          // then this is instead an index into the
+                          // desks array.
+} NodeEntry;
+
 
 /*
         If the byte-array width is less than nine, the data is directly
         inlined into `bytes`.
+
+        It's empty if pointer.ix == UINT32_MAX
 */
 typedef struct leaves_table_entry {
         uint64_t hash;
         tagged_width_t width;
         uint8_t *bytes;
         treenode_t pointer;
-} leaves_table_entry_t;
+} LeafEntry;
 
 typedef struct jelly_ctx {
     // One entry per tree-node
@@ -130,12 +92,12 @@ typedef struct jelly_ctx {
     uint32_t nats_count;
 
     // Leaf Deduplication table.
-    leaves_table_entry_t *leaves_table;
+    LeafEntry *leaves_table;
     uint32_t leaves_table_width;
     uint32_t leaves_table_count;
 
     // Interior-Node Deduplication table.
-    FanEntry *nodes_table;
+    NodeEntry *nodes_table;
     uint32_t nodes_table_width;
     uint32_t nodes_table_count;
 
@@ -146,29 +108,29 @@ typedef struct jelly_ctx {
     uint32_t frags_count;
 } *Jelly;
 
-void print_tree_outline(Jelly, treenode_t);
-void print_tree(Jelly, treenode_t);
 
+// These are basically trivial macros, but written as inline functions
+// for type-safety.
 
-INLINE treenode_value TAG_FRAG(frag_t frag) {
+static INLINE treenode_value TAG_FRAG(frag_t frag) {
         uint64_t index = (uint64_t) frag.ix;
         uint64_t word  = (index | 7ULL << 61);
         return (treenode_value){ word };
 }
 
-INLINE treenode_value TAG_PIN(pin_t pin) {
+static INLINE treenode_value TAG_PIN(pin_t pin) {
         uint64_t index = (uint64_t) pin.ix;
         uint64_t word  = (index | 4ULL << 61);
         return (treenode_value){ word };
 }
 
-INLINE treenode_value TAG_BAR(bar_t bar) {
+static INLINE treenode_value TAG_BAR(bar_t bar) {
         uint64_t index = (uint64_t) bar.ix;
         uint64_t word  = (index | 5ULL << 61);
         return (treenode_value){ word };
 }
 
-INLINE treenode_value TAG_NAT(nat_t nat) {
+static INLINE treenode_value TAG_NAT(nat_t nat) {
         uint64_t index = (uint64_t) nat.ix;
         uint64_t word  = (index | 6ULL << 61);
         return (treenode_value){ word };
@@ -377,8 +339,8 @@ void rehash_nodes_if_full(Jelly ctx) {
         // jelly_debug_interior_nodes(ctx);
         // debugf("\n");
 
-        FanEntry *oldtab = ctx->nodes_table;
-        FanEntry *newtab = malloc(newwid * sizeof(*newtab));
+        NodeEntry *oldtab = ctx->nodes_table;
+        NodeEntry *newtab = malloc(newwid * sizeof(*newtab));
 
         memset(newtab, 255, newwid * sizeof(*newtab));
 
@@ -391,7 +353,7 @@ void rehash_nodes_if_full(Jelly ctx) {
                 scan for an empty slot and write the value there.
         */
         for (uint64_t i=0; i<oldwid; i++) {
-                FanEntry ent = oldtab[i];
+                NodeEntry ent = oldtab[i];
 
                 uint64_t j = ent.hash;
 
@@ -399,7 +361,7 @@ void rehash_nodes_if_full(Jelly ctx) {
 
                 for (;; j++) {
                         j &= newmask;
-                        FanEntry *tar = newtab + j;
+                        NodeEntry *tar = newtab + j;
                         if (tar->val.word == UINT64_MAX) {
                                 *tar = ent;
                                 // debugf("\t\t%lu -> %lu\n", i, j);
@@ -435,8 +397,8 @@ void rehash_leaves_if_full(Jelly ctx) {
         // jelly_debug_leaves(ctx, false);
         // debugf("\n");
 
-        leaves_table_entry_t *oldtab = ctx->leaves_table;
-        leaves_table_entry_t *newtab = malloc(newwid * sizeof(*newtab));
+        LeafEntry *oldtab = ctx->leaves_table;
+        LeafEntry *newtab = malloc(newwid * sizeof(*newtab));
 
         memset(newtab, 255, newwid * sizeof(*newtab));
 
@@ -449,7 +411,7 @@ void rehash_leaves_if_full(Jelly ctx) {
                 scan for an empty slot and write the value there.
         */
         for (uint64_t i=0; i<oldwid; i++) {
-                leaves_table_entry_t ent = oldtab[i];
+                LeafEntry ent = oldtab[i];
 
                 // empty slot
                 if (ent.pointer.ix == UINT32_MAX) continue;
@@ -457,7 +419,7 @@ void rehash_leaves_if_full(Jelly ctx) {
                 uint64_t j = ent.hash;
                 for (;; j++) {
                         j &= newmask;
-                        leaves_table_entry_t *tar = newtab + j;
+                        LeafEntry *tar = newtab + j;
                         if (tar->pointer.ix == UINT32_MAX) {
                                 *tar = ent;
                                 debugf("\t\t%lu -> %lu\n", i, j);
@@ -502,7 +464,7 @@ treenode_t insert_packed_leaf(Jelly ctx, PackedInsertRequest req) {
 
         rehash_leaves_if_full(ctx);
 
-        leaves_table_entry_t *ent = NULL;
+        LeafEntry *ent = NULL;
 
         uint64_t mask = ctx->leaves_table_width - 1;
         uint64_t ix = req.hash;
@@ -551,7 +513,7 @@ treenode_t insert_packed_leaf(Jelly ctx, PackedInsertRequest req) {
         if (DEBUG) print_tree(ctx, pointer);
         debugf("\n");
 
-        *ent = (leaves_table_entry_t){
+        *ent = (LeafEntry){
             .hash  = req.hash,
             .width = req.width,
             .bytes = (uint8_t*) req.word,
@@ -575,7 +537,7 @@ treenode_t insert_indirect_leaf(Jelly ctx, IndirectInsertRequest req) {
                                     // if we do it later, we will invalidate
                                     // our pointer.
 
-        leaves_table_entry_t *ent;
+        LeafEntry *ent;
 
         uint64_t mask = ctx->leaves_table_width - 1;
         uint64_t ix = req.hash;
@@ -617,7 +579,7 @@ treenode_t insert_indirect_leaf(Jelly ctx, IndirectInsertRequest req) {
         if (DEBUG) print_tree(ctx, pointer);
         debugf("\n");
 
-        *ent = (leaves_table_entry_t){
+        *ent = (LeafEntry){
             .hash  = req.hash,
             .width = req.width,
             .bytes = req.leaf.bytes,
@@ -893,7 +855,7 @@ treenode_t jelly_cons(Jelly ctx, treenode_t hed, treenode_t tel) {
         for (;; i++) {
                 i &= mask;
 
-                FanEntry *cur = (ctx->nodes_table + i);
+                NodeEntry *cur = (ctx->nodes_table + i);
 
                 uint64_t word = cur->val.word;
 
@@ -1301,7 +1263,6 @@ struct ser jelly_serialize(Jelly ctx) {
         st.fil = 8 * clif;
 
         debugf("\tfil = %lu\n", st.fil);
-        debugf("\trefbits = %d\n", st.refbits);
         debugf("       "); showbits("acc", 64, 64, st.acc); debugf("\n");
         debugf("       "); showbits("mor", 64, st.fil, st.acc); debugf("\n");
 
@@ -1313,6 +1274,7 @@ struct ser jelly_serialize(Jelly ctx) {
                 int maxref  = frgoff + i - 1;
                 int refbits = word64_bits(maxref);
 
+                debugf("\trefbits = %d\n", refbits);
                 debugf("\nFRAG(%d) [maxref=%d refbits=%d]\n\n", i, maxref, refbits);
 
                 st.offs[0] = pinoff;
@@ -1493,48 +1455,6 @@ static INLINE leaf_t load_leaf(struct ser *st) {
         return result;
 }
 
-/*
-        Alright, what's the algorithm here?
-
-        To read a bit:
-
-            mask the against `1<<red`.
-            bit = (acc & (1<<red));
-            red = (red+1) & 8;
-            if (!red) { WIDTH_CHECK; acc = *buf++; }
-
-        To read a tree:
-
-            -   Read a bit.
-
-            -   If the bit is zero, this is a leaf
-                -   Read n bits.
-                -   n is the bit-width of the maximum backref at this point.
-                -   Use the resulting word, to construct a TreeVal.
-
-                    Can we do better than the following?
-
-                        CHECK_IF_WITHIN_MAXREF()
-                        if (bits < num_pins) return TAG_PIN(bits);
-                        bits -= num_pins
-                        if (bits < num_bars) return TAG_BAR(bits);
-                        bits -= num_bars;
-                        if (bits < num_nats) return TAG_NAT(bits);
-                        bits -= num_nats;
-                        return TAG_FRAG(bits);
-
-            -   Otherwise, this is a cell.
-
-                Here, just use naive recursion, this is not
-                performance-sensitive code.
-
-                Just call load_frag() directly, since that gets a pair.
-
-                    (Uninline it and make it into a function againn);
-
-            -   That's it!  This is not terribly complicated.
-*/
-
 struct frag_loader_state {
         Jelly ctx;
         uint64_t *ptr; // Pointer into the remaining words.
@@ -1566,6 +1486,7 @@ FragVal load_fragment(struct frag_loader_state *s) {
         return fv;
 }
 
+// TODO: Can this be faster?  A for loop over an `offs` table?
 treenode_value decode_leaf(struct frag_loader_state *s, uint32_t leaf) {
         if (leaf < s->num_pins) {
                 return TAG_PIN((pin_t){leaf});
@@ -1848,16 +1769,19 @@ void print_bar(Jelly ctx, bar_t bar) {
         printf("\"");
 }
 
-char ppbuf[256] = {0};
 
 size_t print_pin(Jelly ctx, pin_t pin) {
-        char *hash_bytes = (char*) ctx->pins[pin.ix];
-        size_t output_size;
-        b58enc(ppbuf, &output_size, hash_bytes, 32);
+        char b58[96];
+        size_t b58sz = 96;
+
+        bool okay = b58enc(b58, &b58sz, (void*)ctx->pins[pin.ix], 32);
+
+        if (!okay) die("print_pin(): b58enc failed!\n");
+
         putchar('[');
-        fwrite(ppbuf, 1, output_size, stdout);
+        fwrite(b58, 1, b58sz, stdout);
         putchar(']');
-        return output_size;
+        return b58sz;
 }
 
 void print_tree_outline(Jelly, treenode_t);
@@ -1969,19 +1893,6 @@ void print_fragment(Jelly ctx, frag_t ref) {
         putchar(')');
 }
 
-int treenode_depth(Jelly ctx, treenode_t node) {
-        treenode_value val = ctx->treenodes[node.ix];
-        if (val.word >> 63) return 1;
-        int hed_depth = treenode_depth(ctx, NODEVAL_HEAD(val));
-        int tel_depth = treenode_depth(ctx, NODEVAL_TAIL(val));
-        return (1 + ((hed_depth > tel_depth) ? hed_depth : tel_depth));
-}
-
-int fragment_depth(Jelly ctx, FragVal frag) {
-        int hed_depth = treenode_depth(ctx, frag.head);
-        int tel_depth = treenode_depth(ctx, frag.tail);
-        return (1 + ((hed_depth > tel_depth) ? hed_depth : tel_depth));
-}
 
 void jelly_debug_leaves(Jelly ctx, bool details) {
         debugf("\n\tleaves: (width=%u, count=%u)\n\n",
@@ -1993,7 +1904,7 @@ void jelly_debug_leaves(Jelly ctx, bool details) {
         uint64_t mask = ctx->leaves_table_width - 1;
 
         for (int i=0; i<wid; i++) {
-                leaves_table_entry_t ent = ctx->leaves_table[i];
+                LeafEntry ent = ctx->leaves_table[i];
 
                 // Empty slot
                 if (ent.pointer.ix == UINT32_MAX) continue;
@@ -2026,7 +1937,7 @@ void jelly_debug_interior_nodes(Jelly ctx) {
         uint64_t mask = ctx->nodes_table_width - 1;
 
         for (int i=0; i<wid; i++) {
-                FanEntry ent = ctx->nodes_table[i];
+                NodeEntry ent = ctx->nodes_table[i];
 
                 // Empty slot
                 if (ent.val.word == UINT64_MAX) continue;
@@ -2126,8 +2037,7 @@ void jelly_debug(Jelly ctx) {
         uint32_t count = ctx->frags_count;
         for (int i=0; i<count; i++) {
                 FragVal cur = ctx->frags[i];
-                int depth = fragment_depth(ctx, cur);
-                debugf("\tFragment[%d]: (depth=%d)\n\n\t\t(t%d, t%d) = ", i, depth, cur.head.ix, cur.tail.ix);
+                debugf("\tFragment[%d]:\n\n\t\t(t%d, t%d) = ", i, cur.head.ix, cur.tail.ix);
                 print_fragment_outline(ctx, (frag_t){i});
 
                 debugf("\n\n\t\t    ");

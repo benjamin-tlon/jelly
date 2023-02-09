@@ -63,6 +63,9 @@ leaf_t read_hex() {
 
                 uint8_t byte = hex_value(c, d);
 
+                // Leading zero bytes do not contribute to the width;
+                if (!byte && !count) goto loop;
+
                 if (count >= wid) {
                         wid *= 4;
                         buf = ((tmp==buf) ? malloc(wid) : realloc(buf,wid));
@@ -256,22 +259,25 @@ treenode_t read_one(Jelly ctx) {
 int main () {
         Jelly ctx = jelly_new_ctx();
 
-        // hash256_t dumb_hash_1 = { fmix64(111111), fmix64(65535), fmix64(9),  65536 };
-        // hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
-        read_many(ctx);
 
-        // treenode_t top = read_many(ctx);
-        // treenode_t tmp = jelly_pin(ctx, &dumb_hash_1);
-        // top = jelly_cons(ctx, tmp, top);
-        // tmp = jelly_pin(ctx, &dumb_hash_1);
-        // top = jelly_cons(ctx, tmp, top);
-        // tmp = jelly_pin(ctx, &dumb_hash_2);
-        // top = jelly_cons(ctx, tmp, top);
+        // read_many(ctx);
+
+        hash256_t dumb_hash_1 = { fmix64(111111), fmix64(65535), fmix64(9),  65536 };
+        hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
+
+        treenode_t top = read_many(ctx);
+        treenode_t tmp = jelly_pin(ctx, &dumb_hash_2);
+        top = jelly_cons(ctx, tmp, top);
+        tmp = jelly_pin(ctx, &dumb_hash_1);
+        top = jelly_cons(ctx, tmp, top);
+
+        // TODO: This breaks things for some reason.
+        tmp = jelly_pin(ctx, &dumb_hash_2);
+        top = jelly_cons(ctx, tmp, top);
 
         debugf("# Shatter\n");
 
         jelly_finalize(ctx);
-
         jelly_debug(ctx);
 
         debugf("# Serialize\n");
@@ -279,8 +285,8 @@ int main () {
         struct ser ser = jelly_serialize(ctx);
 
         debugf("# Clean Slate\n");
+        jelly_debug(ctx);
         jelly_wipe_ctx(ctx);
-        // jelly_debug(ctx);
 
         debugf("# De-serialize\n");
         jelly_deserialize(ctx, ser);

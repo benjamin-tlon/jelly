@@ -4,7 +4,7 @@ a.out: jelly.o murmur3.o xxhash.o xxh_x86dispatch.o base58.o harness.o
 harness.o: harness.c jelly.h
 	gcc -O3 -Werror -Wall -c $<
 
-jelly.o: jelly.c murmur3.h libbase58.h xxhash.h
+jelly.o: jelly.c murmur3.h libbase58.h xxhash.h jelly.h
 	gcc -O3 -Werror -Wall -c $<
 
 murmur3.o: murmur3.c murmur3.h

@@ -34,6 +34,19 @@
  0xf8 0xf9 0xfa 0xfb 0xfc 0xfd 0xfe 0xff
  0xf8 0xf9 0xfa 0xfb 0xfc 0xfd 0xfe 0xff)
 
+266 277 288 1243213
+"23" "23" "23" "23" "xxx"
+
+("We knew the world would not be the same."
+ "Some people laughed, some people cried."
+ "Most people we silent."
+ "I remember the line, from Hindu scripture,"
+ "the Bhagavad-Gita.  Vishnu is trying to persuade"
+ "the prince, that he should do his duty, and"
+ "to impress him, takes on his multi-armed form"
+ "and says: \"Now I am become death, the destroyer"
+ "of worlds.\"")
+
 ((0 0 10 0)
 
  ((0 0 3 0) 44 55)
