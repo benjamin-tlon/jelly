@@ -9,7 +9,7 @@
 #include "xxh3.h"
 #include "libbase58.h"
 
-#define DEBUG 1
+#define DEBUG 0
 
 #if DEBUG
 #define debugf(...) printf(__VA_ARGS__)
@@ -971,6 +971,7 @@ uint64_t word_dumpsize(uint64_t word) {
 void word_dump(uint8_t **ptr, uint64_t word) {
         uint8_t *buf = *ptr;
         if (word < 128) {
+                debugf("\tword_dump: byte = %lu\n", word);
                 *buf++ = (uint8_t) word;
         } else {
                 uint8_t width = (uint8_t) word64_bytes(word);
@@ -1061,14 +1062,18 @@ void print_nat(Jelly*, nat_t);
 void print_fragment_outline(Jelly*, frag_t);
 
 struct ser {
-        char *buf;
+        uint8_t *buf;
         size_t wid;
 };
 
 void showbits(char *key, int wid, int num, uint64_t bits) {
         if (!DEBUG) return;
-        if (key) debugf(" %s:", key);
-        else debugf(" (");
+        putchar('\t');
+        putchar('\t');
+        if (key) debugf("%s:", key);
+        putchar('\t');
+
+        putchar('(');
 
         int extra = wid - num;
         for (int i=0; i<extra; i++) putchar('_');
@@ -1076,25 +1081,27 @@ void showbits(char *key, int wid, int num, uint64_t bits) {
         for (num--; num >= 0; num--) {
                 putchar(((bits>>num)&1) ? '1' : '0');
         }
-        if (!key) putchar(')');
+        putchar(')');
+        putchar('\n');
 }
 
 struct frag_state {
-        uint8_t acc;
-        uint8_t fil;
+        uint64_t acc;
+        uint64_t fil;
+        uint64_t *out;
         treenode_t *stack;
-        uint8_t offs[4];
-        uint64_t refbits;
-        uint8_t *out;
+        int offs[4];
+        int refbits;
 };
 
 void serialize_frag(Jelly *ctx, struct frag_state *st, FragVal frag) {
         treenode_t *stack = st->stack;
-        uint8_t fil       = st->fil;
-        uint8_t acc       = st->acc;
-        uint8_t *offs     = st->offs;
-        uint64_t refbits  = st->refbits;
-        uint8_t *out      = st->out;
+
+        uint64_t fil  = st->fil;
+        uint64_t acc  = st->acc;
+        uint64_t *out = st->out;
+        int *offs     = st->offs;
+        int refbits   = st->refbits;
 
         int sp = 0;
 
@@ -1115,60 +1122,69 @@ void serialize_frag(Jelly *ctx, struct frag_state *st, FragVal frag) {
                         if (DEBUG) print_tree_outline(ctx, t);
                         //debugf("\n");
 
-                        debugf("\n\t\t\t\t");
-                        showbits(NULL, 8, fil, acc);
+                        debugf("\n");
+                        showbits(NULL, 64, 64, acc);
+                        showbits(NULL, 64, fil, acc);
 
                         // Output a zero bit
-                        fil = (fil + 1) % 8;
-                        if (!fil) { showbits("flush", 8, 8, acc); *out++ = acc; acc = 0; }
+                        fil = (fil + 1) % 64;
+                        if (!fil) { showbits("flush", 64, 64, acc); *out++ = acc; acc = 0; }
 
-                        showbits("tag", 8, fil, acc);
+                        showbits("tag", 64, fil, acc);
 
-                        uint8_t ptr = (uint8_t) val.word;
+                        // Important that we truncate the high bits here.
+                        uint32_t lef = (uint32_t) val.word;
+
                         uint64_t tag = ((val.word << 1) >> 62);
-                        uint32_t bits = ptr + offs[tag];
+                        uint64_t bits = lef + offs[tag];
 
-                        uint8_t new_bits = (bits << fil);
-                        uint8_t overflow = (bits >> (8 - fil));
+                        uint64_t new_bits = (bits << fil);
+
+                        uint64_t overflow = (bits >> (64 - fil));
+
+                        showbits("OVO", 64, 64, overflow);
+                        debugf("\t\t\t\t[fil=%lu]\n", fil);
+                        debugf("\t\t\t\t[bits=%lu]\n", bits);
+                        debugf("\t\t\t\t[tag=%lu]\n", tag);
+                        debugf("\t\t\t\t[off=%d]\n", offs[tag]);
 
                         // debugf(" [extra=%u]", extra);
                         showbits("v", refbits, refbits, bits);
-
-                        // int new_count = ((fil+refbits)>8) ? 8 : (fil + refbits);
-                        // int ovo_count = ((fil+refbits)>8) ? (8 - (fil + refbits)) : 0;
-                        // showbits("mask", 8, new_count, new_bits);
+                        // wbits("newb", 64, 64, new_bits);
 
                         acc |= new_bits;
                         fil += refbits;
 
-                        if (fil >= 8) {
-                                showbits("overflow", (fil-8), (fil-8), overflow);
-                                showbits("flush", 8, 8, acc);
+                        if (fil >= 64) {
+                                showbits("flush", 64, 64, acc);
                                 *out++ = acc;
                                 acc = overflow;
-                                fil -= 8;
+                                fil -= 64;
                         }
 
-                        showbits(NULL, 8, fil, acc);
+                        showbits(NULL, 64, fil, acc);
+                        showbits(NULL, 64, 64, acc);
 
                         debugf("\n");
                         sp--;
                 } else {
                         debugf("\n");
                         for (int x=0; x<sp; x++) debugf(" ");
-                        debugf("-");
+                        debugf("#");
                         parens++;
 
-                        debugf("\n\t\t\t\t");
-                        showbits(NULL, 8, fil, acc);
+                        debugf("\n");
+                        showbits(NULL, 64, 64, acc);
+                        showbits(NULL, 64, fil, acc);
 
                         // Output a 1 bit.
-                        acc |= (1 << fil);
-                        showbits("tag", 8, (fil+1), acc);
-                        fil = (fil + 1) % 8;
-                        if (!fil) { showbits("flush", 8, 8, acc); *out++ = acc; acc = 0; }
+                        acc |= (1ULL << fil);
+                        showbits("tag", 64, (fil+1), acc);
+                        fil = (fil + 1) % 64;
+                        if (!fil) { showbits("flush", 64, 64, acc); *out++ = acc; acc = 0; }
 
-                        showbits(NULL, 8, fil, acc);
+                        showbits(NULL, 64, fil, acc);
+                        showbits(NULL, 64, 64,  acc);
 
                         // Replaces the current stack pointer.
                         stack[sp++] = NODEVAL_TAIL(val);
@@ -1257,7 +1273,9 @@ struct ser serialize(Jelly *ctx) {
 
         debugf("padded byte width = %lu\n", width);
 
-        struct ser result = (struct ser) { .buf = calloc(1, width), .wid = width };
+        uint8_t *top = calloc(1, width);
+
+        struct ser result = (struct ser) { .buf = top, .wid = width };
 
         // Dumping
 
@@ -1291,27 +1309,54 @@ struct ser serialize(Jelly *ctx) {
         debugf("numfrags = %u\n", numfrags);
         word_dump(&out, numfrags);
 
-        uint64_t maxdepth = 128; // TODO
-
-        uint8_t acc = 0;
-        uint8_t fil = 0;
-        treenode_t stack[maxdepth];
+        if (!numfrags) return result;
 
         struct frag_state st;
-        st.acc = 0;
-        st.fil = 0;
-        st.stack = stack;
-        st.out = out;
+
+        // treenode_t and refcounts are both 32 bits, and there is one
+        // refcount for every node in the whole tree.  The stack only
+        // needs to be as big as the depth of the deepest fragment, so
+        // `refcounts` is plenty big.
+        //
+        // At this stage, we have already shattered the tree, so it's
+        // fine to canibalize memory like this.
+        //
+        // Should, however, document that a Jelly context is "used up"
+        // after serialization, and can only be freed or wiped after that.
+        st.stack = (void*) ctx->refcounts;
+
+
+        // If we are not in word-aligned state, we need to rewind to
+        // the last word-aligned byte.
+        int used = out - top;
+        int clif = used % 8;
+        out -= clif;
+
+
+        /*
+            We read in the current state of the first word, but we don't
+            move the pointer.  When this word has been filled with bytes,
+            we will flush it to the array, replacing the existing `clif`
+            bytes with the same data they started with.
+        */
+        st.out = (uint64_t*) out;
+        st.acc = *(st.out);
+        st.fil = 8 * clif;
+
+        debugf("\tfil = %lu\n", st.fil);
+        debugf("\trefbits = %d\n", st.refbits);
+        debugf("       "); showbits("acc", 64, 64, st.acc); debugf("\n");
+        debugf("       "); showbits("mor", 64, st.fil, st.acc); debugf("\n");
 
         for (int i=0; i<numfrags; i++) {
-                uint8_t pinoff   = 0;
-                uint8_t baroff   = pinoff + numpins;
-                uint8_t natoff   = baroff + numbars;
-                uint8_t frgoff   = natoff + numnats;
-                uint64_t maxref  = frgoff + i - 1;
-                uint64_t refbits = word64_bits(maxref);
+                int pinoff  = 0;
+                int baroff  = pinoff + numpins;
+                int natoff  = baroff + numbars;
+                int frgoff  = natoff + numnats;
+                int maxref  = frgoff + i - 1;
+                int refbits = word64_bits(maxref);
 
-                debugf("\nFRAG(%d) [maxref=%lu refbits=%lu]\n\n", i, maxref, refbits);
+                debugf("\nFRAG(%d) [maxref=%d refbits=%d]\n\n", i, maxref, refbits);
 
                 st.offs[0] = pinoff;
                 st.offs[1] = baroff;
@@ -1322,20 +1367,18 @@ struct ser serialize(Jelly *ctx) {
                 serialize_frag(ctx, &st, ctx->frags[i]);
         }
 
-        out = st.out;
-        acc = st.acc;
-        fil = st.fil;
-
-        if (fil > 0) {
+        if (st.fil > 0) {
                 debugf("\n");
-                showbits("final_flush", 8, 8, acc);
+                showbits("final_flush", 64, 64, st.acc);
                 debugf("\n\n");
-                *out++ = acc;
-                acc = 0;
-                fil = 0;
+                *(st.out) = st.acc;
+                st.out++;
         }
 
-        // Dumping Tree Fragments (TODO)
+       uint8_t *end = (uint8_t*) st.out;
+       if (end - top != width) {
+               die("%lu != width=%lu\n", (end-top), width);
+       }
 
         return result;
 }
@@ -1344,9 +1387,9 @@ struct ser serialize(Jelly *ctx) {
 INLINE uint8_t load_byte(struct ser *st) {
     debugf("\tload_byte() [remain=%lu]\n", st->wid);
 
-    // debugf("\t    [");
-    // for (int i=0; i<10; i++) debugf("%u%s", (uint8_t) st->buf[i], (i==9 ? "" : " "));
-    // debugf("]\n");
+    debugf("\t    [");
+    for (int i=0; i<10; i++) debugf("%u%s", (uint8_t) st->buf[i], (i==9 ? "" : " "));
+    debugf("]\n");
 
     if (st->wid == 0) die("load_byte(): EOF");
     uint8_t byte = *(st->buf++);
@@ -1360,22 +1403,25 @@ uint64_t load_word(struct ser *st) {
 
     // If the high-bit is zero, this is a direct byte.
     if (byt < 128) {
+            debugf("\t\tload_byte = %u\n", byt);
             return (uint64_t) byt;
     }
 
     // The low six bits indicates the length, either the length
     // byte-array, or the length of the length of the byte-array.
-    uint8_t len = byt & 0x00111111;
+    uint8_t len = byt & 0b00111111;
 
     // What about the second-highest bit?  If that bit is set, then `len`
     // is the length of the length-word, otherwise it indicates the
     // number of bytes used to render the word itself.
-    uint8_t flag = byt & (1<<6);
+    uint8_t flag = byt & 0b01000000;
+
+    debugf("\tlen=%u byt=%u flag=%u\n", len, byt, flag);
 
     if (flag) {
-        die("load_word(): Number has a length-of-length, "
-            "which is impossible for something that fits "
-            "in 8 bytes\n");
+            die("load_word(): Number has a length-of-length, "
+                "which is impossible for something that fits "
+                "in 8 bytes\n");
     }
 
     if (len > 8) {
@@ -1586,14 +1632,14 @@ struct load_fragtree_result
 load_fragtree(struct frag_loader_state *s) {
         int refbits = s->ref_bits;
 
-        showbits("mor", 64, (64-s->red), (s->acc >> s->red)); putchar('\n');
+        showbits("mor", 64, (64-s->red), (s->acc >> s->red)); debugf("\n");
 
         uint64_t bit = (s->acc >> s->red) & 1;
 
         s->red = (s->red + 1) % 64;
 
-        showbits("bit", 1, 1, bit); putchar('\n');
-        showbits("mor", 64, (64-s->red), (s->acc >> s->red)); putchar('\n');
+        showbits("bit", 1, 1, bit); debugf("\n");
+        showbits("mor", 64, (64-s->red), (s->acc >> s->red)); debugf("\n");
 
         if (!s->red) {
                 if (!s->rem) die("Internal error: not enough space\n");
@@ -1601,7 +1647,7 @@ load_fragtree(struct frag_loader_state *s) {
                 s->acc = *(s->ptr)++;
         }
 
-        showbits("mor", 64, (64-s->red), (s->acc >> s->red)); putchar('\n');
+        showbits("mor", 64, (64-s->red), (s->acc >> s->red)); debugf("\n");
 
         if (bit) {
                 debugf("cell\n");
@@ -1662,7 +1708,7 @@ load_fragtree(struct frag_loader_state *s) {
         copy, we just slice the input buffer.
 */
 void deserialize(Jelly *ctx, struct ser st) {
-        char *top = st.buf;
+        uint8_t *top = st.buf;
 
         if (st.wid % 8) {
                 die("Input buffer must contain a multiple of 8 bytes.\n");
@@ -1705,7 +1751,6 @@ void deserialize(Jelly *ctx, struct ser st) {
                 int used = (st.buf - top);
                 int clif = used % 8;
 
-                // TODO This is probably wrong where (used % 8)!=0
                 if (st.wid < (8 - clif)) {
                         die("Internal error: not enough bits remain to serialize frags\n");
                 }
@@ -1749,8 +1794,8 @@ void deserialize(Jelly *ctx, struct ser st) {
                         debugf("\t[frag_loader_state]\n");
                         debugf("\tptr = 0x%016lx\n", (uint64_t) s.ptr);
 
-                        debugf("       "); showbits("acc", 64, 64, s.acc); putchar('\n');
-                        debugf("       "); showbits("mor", 64, (64-s.red), (s.acc >> s.red)); putchar('\n');
+                        debugf("       "); showbits("acc", 64, 64, s.acc); debugf("\n");
+                        debugf("       "); showbits("mor", 64, (64-s.red), (s.acc >> s.red)); debugf("\n");
                         debugf("\tred = %lu\n", s.red);
                         debugf("\trem = %lu\n", s.rem);
                         debugf("\tref_bits = %lu\n", s.ref_bits);
@@ -1765,13 +1810,13 @@ void deserialize(Jelly *ctx, struct ser st) {
                 }
 
                 if (s.rem != 0) {
-                        showbits("mor", 64, (64-s.red), (s.acc >> s.red)); putchar('\n');
-                        showbits("mor", 64, 64, s.ptr[1]); putchar('\n');
+                        showbits("mor", 64, (64-s.red), (s.acc >> s.red)); debugf("\n");
+                        showbits("mor", 64, 64, s.ptr[1]); debugf("\n");
                         die("EXTRA STUFF %lu words unread!\n", s.rem);
                 }
 
                 if (s.acc >> s.red) {
-                        showbits("mor", 64, (64-s.red), (s.acc >> s.red)); putchar('\n');
+                        showbits("mor", 64, (64-s.red), (s.acc >> s.red)); debugf("\n");
                         die("EXTRA BITS unread in last word: %lx\n", (s.acc >> s.red));
                 }
 

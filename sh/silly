@@ -4,18 +4,18 @@
 
 make
 
-./a.out < test.sexp > test.tmp
+./a.out < test.sexp > test.tmp1
 
 if test 0 -ne $(diff test.tmp test.out | wc -l)
 then
-    echo "test.tmp does not match test.out (round 1)"
+    echo "test.tmp1 does not match test.out"
 fi
 
-./a.out < test.out > test.tmp
+./a.out < test.out > test.tmp2
 
-if test 0 -ne $(diff test.tmp test.out | wc -l)
+if test 0 -ne $(diff test.tmp2 test.out | wc -l)
 then
-    echo "test.tmp does not match test.out (round 2)"
+    echo "test.tmp does not match test.out"
 fi
 
 time for n in $(seq 999)

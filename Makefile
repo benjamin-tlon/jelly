@@ -17,4 +17,4 @@ xxh_x86dispatch.o: xxh_x86dispatch.c xxhash.h
 	gcc -O2 -Werror -Wall -c $<
 
 clean:
-	rm -f *.o a.out test.tmp
+	rm -f *.o a.out test.tmp test.tmp?
