@@ -180,7 +180,7 @@ INLINE pin_t NODEVAL_PIN(treenode_value v) {
 
 // Memory Management ///////////////////////////////////////////////////////////
 
-Jelly jelly_new_ctx () {
+Jelly jelly_make () {
         Jelly res = malloc(sizeof(struct jelly_ctx));
 
         // One entry per unique node (both leaves and interior nodes)
@@ -231,7 +231,7 @@ Jelly jelly_new_ctx () {
         We don't free ny memory or shrink any tables, we just set the
         size-counts of everything to 0 and empty all the hashtable slots.
 */
-void jelly_wipe_ctx (Jelly ctx) {
+void jelly_wipe (Jelly ctx) {
         ctx->treenodes_count = 0;
         ctx->pins_count = 0;
         ctx->bars_count = 0;
@@ -248,7 +248,7 @@ void jelly_wipe_ctx (Jelly ctx) {
                (sizeof(ctx->nodes_table[0]) * ctx->nodes_table_width));
 }
 
-void jelly_free_ctx (Jelly ctx) {
+void jelly_free (Jelly ctx) {
         free(ctx->treenodes);
         free(ctx->refcounts);
         free(ctx->pins);
@@ -687,7 +687,7 @@ struct shatter shatter(Jelly ctx, treenode_t tree, bool top) {
         return (struct shatter){ .refs = refs, .leaves = leaves };
 }
 
-void jelly_finalize(Jelly ctx) {
+void jelly_done(Jelly ctx) {
         int num = ctx->treenodes_count;
 
         if (num == 0) {
@@ -722,7 +722,7 @@ new_nat (Jelly ctx, leaf_t leaf) {
         return alloc_treenode(ctx, TAG_NAT(nat));
 }
 
-INLINE treenode_t
+static INLINE treenode_t
 jelly_packed_nat(Jelly ctx, uint32_t byte_width, uint64_t word) {
         debugf("\tjelly_packed_nat(%lu, width=%u)\n", word, byte_width);
 
@@ -736,19 +736,26 @@ jelly_packed_nat(Jelly ctx, uint32_t byte_width, uint64_t word) {
         );
 }
 
-treenode_t jelly_nat(Jelly ctx, leaf_t leaf) {
-        debugf("\tjelly_nat(width=%d)\n", leaf.width_bytes);
+treenode_t jelly_word(Jelly ctx, uint64_t word) {
+    int wid = word64_bytes(word);
+    return jelly_packed_nat(ctx, wid, word);
+}
 
-        if (leaf.width_bytes < 9) {
-                return jelly_packed_nat(ctx, leaf.width_bytes, (uint64_t)leaf.bytes);
+treenode_t jelly_nat(Jelly ctx, size_t wid, uint8_t *byt) {
+        debugf("\tjelly_nat(width=%lu)\n", wid);
+
+        if (wid < 9) {
+                uint64_t word = 0;
+                memcpy(&word, byt, wid);
+                return jelly_packed_nat(ctx, wid, word);
         } else {
-                uint64_t hash = XXH3_64bits(leaf.bytes, leaf.width_bytes);
+                uint64_t hash = XXH3_64bits(byt, wid);
 
                 return insert_indirect_leaf(ctx,
                     (IndirectInsertRequest){
-                        .width = NAT_TAGGED_WIDTH(leaf.width_bytes),
+                        .width = NAT_TAGGED_WIDTH(wid),
                         .hash = hash,
-                        .leaf = leaf,
+                        .leaf = (leaf_t){ .width_bytes = wid, .bytes = byt },
                         .new_leaf = new_nat,
                         .ispin = false,
                     }
@@ -781,28 +788,31 @@ new_bar (Jelly ctx, leaf_t leaf) {
         return alloc_treenode(ctx, TAG_BAR(bar));
 }
 
-treenode_t jelly_bar(Jelly ctx, leaf_t leaf) {
-        debugf("\tjelly_bar(width=%d)\n", leaf.width_bytes);
+treenode_t jelly_bar(Jelly ctx, size_t wid, uint8_t *byt) {
+        debugf("\tjelly_bar(width=%lu)\n", wid);
 
-        if (leaf.width_bytes < 9) {
-                uint64_t word = (uint64_t) leaf.bytes;
+        if (wid < 9) {
+                uint64_t word = 0;
+                memcpy(&word, byt, wid);
 
-                debugf("\tjelly_packed_bar(%lu, width=%u)\n", word, leaf.width_bytes);
+                debugf("\tjelly_packed_bar(%lu, width=%lu)\n", word, wid);
 
                 return insert_packed_leaf(ctx,
                     (PackedInsertRequest){
-                        .width = BAR_TAGGED_WIDTH(leaf.width_bytes),
+                        .width = BAR_TAGGED_WIDTH(wid),
                         .hash = fmix64(word),
                         .word = word,
                         .new_leaf = new_bar,
                     }
                 );
         } else {
-                uint64_t hash = XXH3_64bits(leaf.bytes, leaf.width_bytes);
+                uint64_t hash = XXH3_64bits(byt, wid);
+
+                leaf_t leaf = { .width_bytes = wid, .bytes = byt };
 
                 return insert_indirect_leaf(ctx,
                     (IndirectInsertRequest){
-                        .width = BAR_TAGGED_WIDTH(leaf.width_bytes),
+                        .width = BAR_TAGGED_WIDTH(wid),
                         .hash = hash,
                         .leaf = leaf,
                         .new_leaf = new_bar,
@@ -834,7 +844,9 @@ static treenode_t new_pin (Jelly ctx, leaf_t leaf) {
         return alloc_treenode(ctx, TAG_PIN(pin));
 }
 
-treenode_t jelly_pin(Jelly ctx, hash256_t *pin) {
+treenode_t jelly_pin(Jelly ctx, uint8_t *hash_bytes) {
+        hash256_t *pin = (void*) hash_bytes;
+
         debugf("\tjelly_pin(hash=%lx)\n", pin->a);
 
         uint64_t hash = pin->a;
@@ -1132,7 +1144,7 @@ serialize_frag(Jelly ctx, struct frag_state *st, FragVal frag) {
         st->out = out;
 }
 
-struct ser jelly_serialize(Jelly ctx) {
+size_t jelly_size(Jelly ctx) {
         uint64_t width = 0;
         uint64_t refrs = 0;
 
@@ -1143,6 +1155,7 @@ struct ser jelly_serialize(Jelly ctx) {
 
         refrs += numpins;
         width += word_dumpsize(numpins);
+
         debugf("buffer_bytes (after pin_width) = %lu\n", width);
         width += numpins * sizeof(hash256_t);
         debugf("buffer_bytes (after pins) = %lu\n", width);
@@ -1208,13 +1221,18 @@ struct ser jelly_serialize(Jelly ctx) {
 
         debugf("padded byte width = %lu\n", width);
 
-        uint8_t *top = calloc(1, width);
+        return width;
+}
 
-        struct ser result = (struct ser) { .buf = top, .wid = width };
+void jelly_dump(Jelly ctx, size_t width, uint8_t *top) {
+        uint32_t numpins  = ctx->pins_count;
+        uint32_t numbars  = ctx->bars_count;
+        uint32_t numnats  = ctx->nats_count;
+        uint32_t numfrags = ctx->frags_count;
 
         // Dumping
 
-        uint8_t *out = (uint8_t*) result.buf;
+        uint8_t *out = (uint8_t*) top;
 
         // Dumping Leaves
 
@@ -1244,7 +1262,10 @@ struct ser jelly_serialize(Jelly ctx) {
         debugf("numfrags = %u\n", numfrags);
         word_dump(&out, numfrags);
 
-        if (!numfrags) return result;
+        if (!numfrags) {
+                // TODO Validate that we have filled the buffer.
+                return;
+	}
 
         struct frag_state st;
 
@@ -1314,8 +1335,6 @@ struct ser jelly_serialize(Jelly ctx) {
        if (end - top != width) {
                die("%lu != width=%lu\n", (end-top), width);
        }
-
-        return result;
 }
 
 
@@ -1601,8 +1620,8 @@ load_fragtree(struct frag_loader_state *s) {
         Note that for pins, indirect atoms, and indirect bars we do not
         copy, we just slice the input buffer.
 */
-void jelly_deserialize(Jelly ctx, struct ser st) {
-        uint8_t *top = st.buf;
+void jelly_load(Jelly ctx, size_t wid, uint8_t *top) {
+        struct ser st = { .buf = top, .wid = wid };
 
         if (st.wid % 8) {
                 die("Input buffer must contain a multiple of 8 bytes.\n");
@@ -1979,7 +1998,7 @@ void jelly_debug_interior_nodes(Jelly ctx) {
 }
 
 
-void jelly_debug(Jelly ctx) {
+void jelly_dbug(Jelly ctx) {
         if (!DEBUG) return;
 
         debugf("\njelly_debug():\n");
@@ -2070,7 +2089,7 @@ void jelly_debug(Jelly ctx) {
         }
 }
 
-void jelly_print(Jelly ctx) {
+void jelly_show(Jelly ctx) {
         uint32_t frags = ctx->frags_count;
 
         if (frags) {

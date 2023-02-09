@@ -113,11 +113,9 @@ leaf_t read_hex() {
             return (leaf_t){ .width_bytes = 0, .bytes = 0 };
         }
 
-        uint64_t word = 0; // Only use for short values
-
         int byt_wid = (use/2) + (use%2);
 
-        uint8_t *bytes = (byt_wid>8 ? malloc(byt_wid) : (void*) &word);
+        uint8_t *bytes = malloc(byt_wid);
 
         uint8_t *bptr = &(bytes[byt_wid - 1]);
 
@@ -139,11 +137,7 @@ leaf_t read_hex() {
 
         debugf("read_hex(): byt_wid=%d\n", byt_wid);
 
-        if (byt_wid > 8) {
-                return (leaf_t){ .width_bytes = byt_wid, .bytes = bytes };
-        } else {
-                return (leaf_t){ .width_bytes = byt_wid, .bytes = (void*) word };
-        }
+        return (leaf_t){ .width_bytes = byt_wid, .bytes = bytes };
 }
 
 uint64_t read_word(uint64_t acc) {
@@ -190,22 +184,13 @@ leaf_t read_string() {
         leaf.width_bytes = count;
 
         debugf("\tread_string() -> \"%s\" (%lu)\n", buf, count);
-        // debugf("read_string()\n");
 
-
-        if (count < 9) {
-                leaf.bytes = (uint8_t*) pack_bytes_lsb(count, buf);
-                debugf("\t\t(direct)\n");
-        } else {
-                leaf.bytes = calloc(count+1, 1);
-                memcpy(leaf.bytes, buf, count);
-                debugf("\t\t(indirect)\n");
-        }
+        leaf.bytes = calloc(count+1, 1);
+        memcpy(leaf.bytes, buf, count);
 
         debugf("\t\t(width=%d)\n", leaf.width_bytes);
         free(buf);
         return leaf;
-
 }
 
 void eat_comment() {
@@ -241,14 +226,18 @@ treenode_t read_leaf(Jelly ctx) {
         int c = getchar();
 
         switch (c) {
-            case '"':
-                return jelly_bar(ctx, read_string());
+            case '"': {
+                // TODO Don't pack
+                leaf_t leaf = read_string();
+                return jelly_bar(ctx, leaf.width_bytes, leaf.bytes);
+            }
             case '[':
                 die("TODO: Parse pins\n");
             case '0': {
                 int d = getchar();
                 if (d == 'x') {
-                        return jelly_nat(ctx, read_hex());
+                        leaf_t leaf = read_hex();
+                        return jelly_nat(ctx, leaf.width_bytes, leaf.bytes);
                 }
                 ungetc(d, stdin);
             } // fallthrough
@@ -262,8 +251,7 @@ treenode_t read_leaf(Jelly ctx) {
             case '8':
             case '9':
                 uint64_t word = read_word((uint64_t)(c - '0'));
-                uint32_t width = word64_bytes(word);
-                return jelly_packed_nat(ctx, width, word);
+                return jelly_word(ctx, word);
             default:
                 die("Not a leaf: '%c'\n", c);
         }
@@ -308,8 +296,7 @@ treenode_t read_one(Jelly ctx) {
 
 
 int main () {
-        Jelly ctx = jelly_new_ctx();
-
+        Jelly ctx = jelly_make();
 
         // read_many(ctx);
 
@@ -317,36 +304,37 @@ int main () {
         hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
 
         treenode_t top = read_many(ctx);
-        treenode_t tmp = jelly_pin(ctx, &dumb_hash_2);
+        treenode_t tmp = jelly_pin(ctx, (void*) &dumb_hash_2);
         top = jelly_cons(ctx, tmp, top);
-        tmp = jelly_pin(ctx, &dumb_hash_1);
+        tmp = jelly_pin(ctx, (void*) &dumb_hash_1);
         top = jelly_cons(ctx, tmp, top);
 
         // TODO: This breaks things for some reason.
-        tmp = jelly_pin(ctx, &dumb_hash_2);
+        tmp = jelly_pin(ctx, (void*) &dumb_hash_2);
         top = jelly_cons(ctx, tmp, top);
 
         debugf("# Shattering Fragments\n");
 
-        jelly_finalize(ctx);
-        jelly_debug(ctx);
+        jelly_done(ctx);
+        jelly_dbug(ctx);
 
         debugf("# Dumping to Buffer\n");
 
-        struct ser ser = jelly_serialize(ctx);
+        size_t   bwid = jelly_size(ctx);
+        uint8_t *bbuf = calloc(bwid, 1);
+
+        jelly_dump(ctx, bwid, bbuf);
 
         debugf("# Wiping the Context\n");
-        jelly_wipe_ctx(ctx);
+        jelly_wipe(ctx);
 
         debugf("# Loading from Buffer\n");
-        jelly_deserialize(ctx, ser);
+        jelly_load(ctx, bwid, bbuf);
 
-        jelly_debug(ctx);
+        jelly_dbug(ctx);
 
-        jelly_print(ctx);
+        jelly_show(ctx);
 
-        free(ser.buf);
-        jelly_free_ctx(ctx);
-
-        return 0;
+        free(bbuf);
+        jelly_free(ctx);
 }

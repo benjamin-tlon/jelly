@@ -72,20 +72,21 @@ struct ser {
 
 // Functions ///////////////////////////////////////////////////////////////////
 
-Jelly jelly_new_ctx();
-void jelly_wipe_ctx(Jelly);
-void jelly_free_ctx(Jelly);
+Jelly jelly_make();
 
-void jelly_finalize(Jelly);
-void jelly_debug(Jelly);
-void jelly_print(Jelly);
+void jelly_wipe(Jelly);
+void jelly_free(Jelly);
+void jelly_done(Jelly);
+void jelly_dbug(Jelly);
+void jelly_show(Jelly);
 
-treenode_t jelly_pin(Jelly, hash256_t*);
-treenode_t jelly_bar(Jelly, leaf_t);
-treenode_t jelly_nat(Jelly, leaf_t);
+treenode_t jelly_pin(Jelly, uint8_t*);
+treenode_t jelly_bar(Jelly, size_t, uint8_t*);
+treenode_t jelly_nat(Jelly, size_t, uint8_t*);
 treenode_t jelly_cons(Jelly, treenode_t, treenode_t);
-treenode_t jelly_packed_nat(Jelly, uint32_t, uint64_t);
+treenode_t jelly_word(Jelly, uint64_t);
 
-struct ser jelly_serialize(Jelly);
+size_t jelly_size(Jelly);
 
-void jelly_deserialize(Jelly, struct ser);
+void jelly_dump(Jelly, size_t, uint8_t*);
+void jelly_load(Jelly, size_t, uint8_t*);
