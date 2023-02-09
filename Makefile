@@ -1,13 +1,10 @@
-a.out: jelly.o murmur3.o xxhash.o xxh_x86dispatch.o base58.o harness.o
+a.out: jelly.o xxhash.o xxh_x86dispatch.o base58.o harness.o
 	gcc -O3 -Werror -Wall $^
 
 harness.o: harness.c jelly.h
 	gcc -O3 -Werror -Wall -c $<
 
-jelly.o: jelly.c murmur3.h libbase58.h xxhash.h jelly.h
-	gcc -O3 -Werror -Wall -c $<
-
-murmur3.o: murmur3.c murmur3.h
+jelly.o: jelly.c libbase58.h xxhash.h jelly.h
 	gcc -O3 -Werror -Wall -c $<
 
 base58.o: base58.c libbase58.h

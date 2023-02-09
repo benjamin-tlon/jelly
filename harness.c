@@ -48,51 +48,102 @@ uint64_t pack_bytes_lsb(size_t width, char *bytes) {
         return res;
 }
 
-// TODO: Instead of reading pairs, use an accumulator byte like when
-// we bit-deserialize.
-leaf_t read_hex() {
-        size_t count=0, wid=256;
-        char tmp[256], *buf=tmp;
+/*
+        0x     ()    []           -> {}
+        0xf    (15)  []           -> {15} <> {}
+        0xff   ()    [255]        -> {255}
+        0xfff  (15)  [255]        -> {15} <> {255}
+        0xfffe ()    [255, 254]   -> {254, 255}
 
-    loop:
+        0x       ()    []           -> {}
+        0x0      (0)   []           -> {}
+        0x00     ()    []           -> {}
+        0x00f    (15)  []           -> {15} <> {}
+        0x00ff   ()    [255]        -> {255}
+        0x00ff0  (0)   [255]        -> {0} <> {255}
+        0x00ff00 (00)  [255,0]      -> {0,255}
+*/
+leaf_t read_hex() {
+        uint8_t *hex_digits = malloc(2048);
+        int use = 0;
+        int wid = 2048;
+
+    getloop:
 
         char c = getchar();
 
-        if (isalnum(c)) {
-                char d = getchar();
+        uint8_t x;
 
-                uint8_t byte = hex_value(c, d);
-
-                // Leading zero bytes do not contribute to the width;
-                if (!byte && !count) goto loop;
-
-                if (count >= wid) {
-                        wid *= 4;
-                        buf = ((tmp==buf) ? malloc(wid) : realloc(buf,wid));
-                }
-
-                buf[count++] = byte;
-
-                goto loop;
+        switch (c) {
+            case '0': case '1': case '2': case '3': case '4':
+            case '5': case '6': case '7': case '8': case '9':
+                x = (c - '0');
+                break;
+            case 'a': case 'b': case 'c': case 'd': case 'e': case 'f':
+                x = 10 + (c - 'a');
+                break;
+            case 'A': case 'B': case 'C': case 'D': case 'E': case 'F':
+                x = 10 + (c - 'A');
+                break;
+            default:
+                goto end;
         }
 
-        ungetc(c, stdin);
+        if (use >= wid) {
+                wid *= 2;
+                hex_digits = realloc(hex_digits, wid);
+        }
 
-        leaf_t result = { .width_bytes = count, .bytes = NULL };
+        hex_digits[use++] = x;
 
-        if (count < 8) {
-                uint8_t **hack_slot = &(result.bytes);
-                *((uint64_t*)hack_slot) = pack_bytes_msb(count, buf);
+        goto getloop;
+
+    end:
+
+        uint8_t *freeme = hex_digits;
+
+        // Ignore leading zeros.
+        while (use > 0 && !hex_digits[0]) {
+                hex_digits++;
+                use--;
+        }
+
+        if (use == 0) {
+            free(freeme);
+            return (leaf_t){ .width_bytes = 0, .bytes = 0 };
+        }
+
+        uint64_t word = 0; // Only use for short values
+
+        int byt_wid = (use/2) + (use%2);
+
+        uint8_t *bytes = (byt_wid>8 ? malloc(byt_wid) : (void*) &word);
+
+        uint8_t *bptr = &(bytes[byt_wid - 1]);
+
+        // If there's an odd number of hex-digits, the high-byte is just
+        // the hex-digit-value of the first hex-digit.
+        if (use%2) {
+                *bptr = hex_digits[0];
+                hex_digits++;
+                use--;
+                bptr--;
+        }
+
+        for (int i=0; i<use; i+=2) {
+                uint8_t byte = (hex_digits[i] << 4) | hex_digits[i+1];
+                *bptr-- = byte;
+        }
+
+        free(freeme);
+
+        debugf("read_hex(): byt_wid=%d\n", byt_wid);
+
+        if (byt_wid > 8) {
+                return (leaf_t){ .width_bytes = byt_wid, .bytes = bytes };
         } else {
-                result.bytes = malloc(count);
-                for (int i=0, j=(count-1); i<count; i++, j--) {
-                    result.bytes[i] = buf[j];
-                }
+                return (leaf_t){ .width_bytes = byt_wid, .bytes = (void*) word };
         }
-
-        if (buf != tmp) free(buf);
-
-        return result;
 }
 
 uint64_t read_word(uint64_t acc) {
@@ -275,20 +326,19 @@ int main () {
         tmp = jelly_pin(ctx, &dumb_hash_2);
         top = jelly_cons(ctx, tmp, top);
 
-        debugf("# Shatter\n");
+        debugf("# Shattering Fragments\n");
 
         jelly_finalize(ctx);
         jelly_debug(ctx);
 
-        debugf("# Serialize\n");
+        debugf("# Dumping to Buffer\n");
 
         struct ser ser = jelly_serialize(ctx);
 
-        debugf("# Clean Slate\n");
-        jelly_debug(ctx);
+        debugf("# Wiping the Context\n");
         jelly_wipe_ctx(ctx);
 
-        debugf("# De-serialize\n");
+        debugf("# Loading from Buffer\n");
         jelly_deserialize(ctx, ser);
 
         jelly_debug(ctx);

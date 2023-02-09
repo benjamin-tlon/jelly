@@ -314,6 +314,7 @@ typedef struct {
 } PackedInsertRequest;
 
 typedef struct {
+        bool ispin;
         tagged_width_t width;
         uint64_t hash;
         leaf_t leaf;
@@ -444,6 +445,10 @@ treenode_t insert_packed_leaf(Jelly ctx, PackedInsertRequest req) {
         uint64_t tag   = (req.width.word >> 62);
         uint64_t bytes = (req.width.word << 2) >> 2;
 
+        if (word64_bytes(req.word) != bytes) {
+                die("Bad width on packed leaf\n");
+        }
+
         debugf(
             "\tpacked_insert(tag=%lu, wid=%lu, hash=%lu, %lu)\n",
             tag,
@@ -526,6 +531,16 @@ void print_nat_leaf(Jelly, leaf_t);
 
 treenode_t insert_indirect_leaf(Jelly ctx, IndirectInsertRequest req) {
         debugf("\tinsert_indirect_leaf(wid=%u)\n", req.leaf.width_bytes);
+
+        int wid = req.leaf.width_bytes;
+
+        if (wid < 9) {
+                die("Invalid indirect leaf: Too Short! Should be direct!\n");
+        }
+
+        if (!req.ispin && req.leaf.bytes[wid - 1] == 0) {
+                die("Invalid indirect leaf: Most significant byte is zero!\n");
+        }
 
         /*
                 Do a linear-search over the leaves table, and return the
@@ -735,6 +750,7 @@ treenode_t jelly_nat(Jelly ctx, leaf_t leaf) {
                         .hash = hash,
                         .leaf = leaf,
                         .new_leaf = new_nat,
+                        .ispin = false,
                     }
                 );
         }
@@ -829,6 +845,7 @@ treenode_t jelly_pin(Jelly ctx, hash256_t *pin) {
                 .hash = hash,
                 .leaf = (leaf_t) { .width_bytes = 32, .bytes = (uint8_t*) pin },
                 .new_leaf = new_pin,
+                .ispin = true,
             }
         );
 }
@@ -1457,7 +1474,7 @@ static INLINE leaf_t load_leaf(struct ser *st) {
 struct frag_loader_state {
         Jelly ctx;
         uint64_t *ptr; // Pointer into the remaining words.
-        uint64_t rem;  // Remaining words in the buffer.
+        int rem;       // Remaining words in the buffer.
         uint64_t acc;  // The last word read from the buffer.
         uint64_t red;  // The number of bits of `acc` that have been consumed.
 
@@ -1674,7 +1691,7 @@ void jelly_deserialize(Jelly ctx, struct ser st) {
                         debugf("       "); showbits("acc", 64, 64, s.acc); debugf("\n");
                         debugf("       "); showbits("mor", 64, (64-s.red), (s.acc >> s.red)); debugf("\n");
                         debugf("\tred = %lu\n", s.red);
-                        debugf("\trem = %lu\n", s.rem);
+                        debugf("\trem = %d\n", s.rem);
                         debugf("\tref_bits = %lu\n", s.ref_bits);
                         debugf("\tmax_ref = %lu\n", s.max_ref);
                         debugf("\tnum_pins = %lu\n", s.num_pins);
@@ -1687,14 +1704,22 @@ void jelly_deserialize(Jelly ctx, struct ser st) {
                 }
 
                 if (s.rem != 0) {
-                        showbits("mor", 64, (64-s.red), (s.acc >> s.red)); debugf("\n");
-                        showbits("mor", 64, 64, s.ptr[1]); debugf("\n");
-                        die("EXTRA STUFF %lu words unread!\n", s.rem);
+                        // TODO: cleaner handling of this edge-case
+                        if (s.rem == -1 && s.red == 0);
+                        else {
+                                showbits("mor", 64, (64-s.red), (s.acc >> s.red)); debugf("\n");
+                                showbits("mor", 64, 64, s.ptr[1]); debugf("\n");
+                                die("EXTRA STUFF %d words unread!\n", s.rem);
+                        }
                 }
 
                 if (s.acc >> s.red) {
-                        showbits("mor", 64, (64-s.red), (s.acc >> s.red)); debugf("\n");
-                        die("EXTRA BITS unread in last word: %lx\n", (s.acc >> s.red));
+                        // TODO: cleaner handling of this edge-case
+                        if (s.rem == -1 && s.red == 0);
+                        else {
+                                showbits("mor", 64, (64-s.red), (s.acc >> s.red)); debugf("\n");
+                                die("EXTRA BITS unread in last word: %lx\n", (s.acc >> s.red));
+                        }
                 }
 
         } else {
