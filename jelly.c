@@ -6,7 +6,6 @@
 #include <string.h>
 
 #include "jelly.h"
-#include "murmur3.h"
 #include "xxh3.h"
 #include "libbase58.h"
 
