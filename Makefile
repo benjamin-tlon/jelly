@@ -1,20 +1,20 @@
 a.out: jelly.o murmur3.o xxhash.o xxh_x86dispatch.o base58.o
-	gcc -O2 -Werror -Wall $^
+	gcc -O3 -Werror -Wall $^
 
 jelly.o: jelly.c murmur3.h libbase58.h xxhash.h
-	gcc -O2 -Werror -Wall -c $<
+	gcc -O3 -Werror -Wall -c $<
 
 murmur3.o: murmur3.c murmur3.h
-	gcc -O2 -Werror -Wall -c $<
+	gcc -O3 -Werror -Wall -c $<
 
 base58.o: base58.c libbase58.h
-	gcc -O2 -Werror -Wall -c $<
+	gcc -O3 -Werror -Wall -c $<
 
 xxhash.o: xxhash.c xxhash.h
-	gcc -O2 -Werror -Wall -c $<
+	gcc -O3 -Werror -Wall -c $<
 
 xxh_x86dispatch.o: xxh_x86dispatch.c xxhash.h
-	gcc -O2 -Werror -Wall -c $<
+	gcc -O3 -Werror -Wall -c $<
 
 clean:
 	rm -f *.o a.out test.tmp test.tmp?

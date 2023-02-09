@@ -967,7 +967,6 @@ uint64_t word_dumpsize(uint64_t word) {
         return 1 + word64_bytes(word);
 }
 
-// TODO: Test test test
 void word_dump(uint8_t **ptr, uint64_t word) {
         uint8_t *buf = *ptr;
         if (word < 128) {
@@ -983,13 +982,10 @@ void word_dump(uint8_t **ptr, uint64_t word) {
 
                 *buf++ = tagged_width;
 
-                // TODO Can I use memcpy here?
-                for (int i=0; i<width; i++) {
-                        uint8_t byte = word;
-                        debugf("\tword_dump: byte[%d] = %u (rest=%lu)\n", i, byte, (word>>8));
-                        *buf++ = byte;
-                        word = word >> 8;
-                }
+                // Little-endian architecture only.
+                memcpy(buf, &word, width);
+
+                buf += width;
         }
 
         *ptr = buf;
@@ -1017,7 +1013,6 @@ uint64_t leaf_dumpsize(leaf_t leaf) {
         return 1 + word64_bytes(leaf.width_bytes) + leaf.width_bytes;
 }
 
-// TODO: Test test test
 uint8_t *dump_leaf(uint8_t *buf, leaf_t leaf) {
         uint64_t wid = leaf.width_bytes;
 
@@ -1042,15 +1037,14 @@ uint8_t *dump_leaf(uint8_t *buf, leaf_t leaf) {
                 debugf("\tdump big\n");
                 uint8_t widwid = word64_bytes(wid);
 
+                // Tagged Length-of-Length
                 *buf++ = (widwid | 192); // 0b11xxxxxx
 
-                // TODO Can I use memcpy here too?
-                uint64_t tmp = wid;
-                for (int i=0; i<widwid; i++) {
-                        *buf++ = (uint8_t) tmp;
-                        tmp = tmp >> 8;
-                }
+                // Length (Taking advantage of Little-endian architecture)
+                memcpy(buf, &wid, widwid);
+                buf += widwid;
 
+                // Actual data.
                 memcpy(buf, leaf.bytes, wid);
                 buf += wid;
                 return buf;

@@ -6,7 +6,7 @@ make
 
 ./a.out < test.sexp > test.tmp1
 
-if test 0 -ne $(diff test.tmp test.out | wc -l)
+if test 0 -ne $(diff test.tmp1 test.out | wc -l)
 then
     echo "test.tmp1 does not match test.out"
 fi
