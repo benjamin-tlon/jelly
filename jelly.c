@@ -445,8 +445,8 @@ treenode_t insert_packed_leaf(Jelly ctx, PackedInsertRequest req) {
         uint64_t tag   = (req.width.word >> 62);
         uint64_t bytes = (req.width.word << 2) >> 2;
 
-        if (word64_bytes(req.word) != bytes) {
-                die("Bad width on packed leaf\n");
+        if (word64_bytes(req.word) > 8) {
+                die("packed leaf is too big to actually be packed\n");
         }
 
         debugf(
@@ -536,10 +536,6 @@ treenode_t insert_indirect_leaf(Jelly ctx, IndirectInsertRequest req) {
 
         if (wid < 9) {
                 die("Invalid indirect leaf: Too Short! Should be direct!\n");
-        }
-
-        if (!req.ispin && req.leaf.bytes[wid - 1] == 0) {
-                die("Invalid indirect leaf: Most significant byte is zero!\n");
         }
 
         /*
@@ -744,23 +740,36 @@ treenode_t jelly_word(Jelly ctx, uint64_t word) {
 treenode_t jelly_nat(Jelly ctx, size_t wid, uint8_t *byt) {
         debugf("\tjelly_nat(width=%lu)\n", wid);
 
-        if (wid < 9) {
+        if (wid == 0) {
+                return jelly_word(ctx, 0);
+	}
+
+	if (wid < 9) {
                 uint64_t word = 0;
                 memcpy(&word, byt, wid);
-                return jelly_packed_nat(ctx, wid, word);
-        } else {
-                uint64_t hash = XXH3_64bits(byt, wid);
 
-                return insert_indirect_leaf(ctx,
-                    (IndirectInsertRequest){
-                        .width = NAT_TAGGED_WIDTH(wid),
-                        .hash = hash,
-                        .leaf = (leaf_t){ .width_bytes = wid, .bytes = byt },
-                        .new_leaf = new_nat,
-                        .ispin = false,
-                    }
-                );
+                if (word64_bytes(word) != wid) {
+                        die("Invalid small nat: width doesn't match data\n");
+		}
+
+                return jelly_word(ctx, word);
+	}
+
+        uint64_t hash = XXH3_64bits(byt, wid);
+
+        if (byt[wid - 1] == 0) {
+                die("Invalid indirect nat: Most significant byte is zero!\n");
         }
+
+        return insert_indirect_leaf(ctx,
+            (IndirectInsertRequest){
+                .width = NAT_TAGGED_WIDTH(wid),
+                .hash = hash,
+                .leaf = (leaf_t){ .width_bytes = wid, .bytes = byt },
+                .new_leaf = new_nat,
+                .ispin = false,
+            }
+        );
 }
 
 
@@ -793,7 +802,8 @@ treenode_t jelly_bar(Jelly ctx, size_t wid, uint8_t *byt) {
 
         if (wid < 9) {
                 uint64_t word = 0;
-                memcpy(&word, byt, wid);
+
+                if (wid) memcpy(&word, byt, wid);
 
                 debugf("\tjelly_packed_bar(%lu, width=%lu)\n", word, wid);
 
@@ -919,19 +929,28 @@ treenode_t jelly_cons(Jelly ctx, treenode_t hed, treenode_t tel) {
 // 255        -> 0b10000001_11111111
 // 256        -> 0b10000001_00000000_00000001
 // UINT64_MAX -> 0b10001000_11111111_(x8)
-uint64_t word_dumpsize(uint64_t word) {
-        if (word < 128) return 1;
-        return 1 + word64_bytes(word);
+uint64_t word_dumpsize(uint64_t word, int wid) {
+        if (wid == 0 && word == 0) {
+                return 1;
+	}
+        if (wid == 1 && word > 0 && word < 128) {
+                return 1;
+	}
+        // Words are never big enough to require length-of-length
+        return 1 + wid;
 }
 
-void word_dump(uint8_t **ptr, uint64_t word) {
+void word_dump(uint8_t **ptr, int wid, uint64_t word) {
         uint8_t *buf = *ptr;
-        if (word < 128) {
-                debugf("\tword_dump: byte = %lu\n", word);
+        if (wid == 0 && word == 0) {
+                debugf("\tword_dump: empty (==0)\n");
+                uint8_t byt = 0;
+                *buf++ = byt;
+	} else if (wid == 1 && word < 128 && word > 0) {
+                debugf("\tword_dump: byte = %lu (wid=%d)\n", word, wid);
                 *buf++ = (uint8_t) word;
         } else {
-                uint8_t width = (uint8_t) word64_bytes(word);
-
+                uint8_t width = wid;
                 uint8_t tagged_width = width | 0b10000000;
 
                 debugf("\tword_dump: width = %u\n", width);
@@ -956,7 +975,7 @@ void word_dump(uint8_t **ptr, uint64_t word) {
 uint64_t leaf_dumpsize(leaf_t leaf) {
         if (leaf.width_bytes < 9) {
                 // debugf("\tDIRECT (word=%lu)\n", (uint64_t) leaf.bytes);
-                return word_dumpsize((uint64_t) leaf.bytes);
+                return word_dumpsize((uint64_t) leaf.bytes, leaf.width_bytes);
         }
 
         // single-byte length field
@@ -975,7 +994,7 @@ uint8_t *dump_leaf(uint8_t *buf, leaf_t leaf) {
 
         if (wid < 9) {
                 debugf("\tdump direct\n");
-                word_dump(&buf, (uint64_t) leaf.bytes);
+                word_dump(&buf, wid, (uint64_t) leaf.bytes);
                 return buf;
         }
 
@@ -1154,14 +1173,14 @@ size_t jelly_size(Jelly ctx) {
         uint32_t numfrags = ctx->frags_count;
 
         refrs += numpins;
-        width += word_dumpsize(numpins);
+        width += word_dumpsize(numpins, word64_bytes(numpins));
 
         debugf("buffer_bytes (after pin_width) = %lu\n", width);
         width += numpins * sizeof(hash256_t);
         debugf("buffer_bytes (after pins) = %lu\n", width);
 
         refrs += numbars;
-        width += word_dumpsize(numbars);
+        width += word_dumpsize(numbars, word64_bytes(numbars));
         debugf("buffer_bytes (bar_width) = %lu\n", width);
         for (int i=0; i<numbars; i++) {
                 width += leaf_dumpsize(ctx->bars[i]);
@@ -1172,7 +1191,7 @@ size_t jelly_size(Jelly ctx) {
         }
 
         refrs += numnats;
-        width += word_dumpsize(numnats);
+        width += word_dumpsize(numnats, word64_bytes(numnats));
         debugf("buffer_bytes (after nats count) = %lu\n", width);
         for (int i=0; i<numnats; i++) {
                 width += leaf_dumpsize(ctx->nats[i]);
@@ -1182,7 +1201,7 @@ size_t jelly_size(Jelly ctx) {
                 debugf("\n\n");
         }
 
-        width += word_dumpsize(ctx->frags_count);
+        width += word_dumpsize(ctx->frags_count, word64_bytes(ctx->frags_count));
         debugf("buffer_bytes (after frags count) = %lu\n", width);
 
         uint64_t treebits = 0;
@@ -1237,7 +1256,7 @@ void jelly_dump(Jelly ctx, size_t width, uint8_t *top) {
         // Dumping Leaves
 
         debugf("numpins = %u\n", numpins);
-        word_dump(&out, numpins);
+        word_dump(&out, word64_bytes(numpins), numpins);
         for (int i=0; i<numpins; i++) {
                 debugf("p%d\n", i);
                 hash256_t *pin = ctx->pins[i];
@@ -1246,21 +1265,21 @@ void jelly_dump(Jelly ctx, size_t width, uint8_t *top) {
         }
 
         debugf("numbars = %u\n", numbars);
-        word_dump(&out, numbars);
+        word_dump(&out, word64_bytes(numbars), numbars);
         for (int i=0; i<numbars; i++) {
                 debugf("b%d\n", i);
                 out = dump_leaf(out, ctx->bars[i]);
         }
 
         debugf("numnats = %u\n", numnats);
-        word_dump(&out, numnats);
+        word_dump(&out, word64_bytes(numnats), numnats);
         for (int i=0; i<numnats; i++) {
                 debugf("n%d\n", i);
                 out = dump_leaf(out, ctx->nats[i]);
         }
 
         debugf("numfrags = %u\n", numfrags);
-        word_dump(&out, numfrags);
+        word_dump(&out, word64_bytes(numfrags), numfrags);
 
         if (!numfrags) {
                 // TODO Validate that we have filled the buffer.
