@@ -80,7 +80,8 @@ void jelly_done(Jelly);
 void jelly_dbug(Jelly);
 void jelly_show(Jelly);
 
-treenode_t jelly_pin(Jelly, uint8_t*);
+// TODO: Tell us if it was unique!
+treenode_t jelly_pin(Jelly, bool*, uint8_t*);
 treenode_t jelly_bar(Jelly, size_t, uint8_t*);
 treenode_t jelly_nat(Jelly, size_t, uint8_t*);
 treenode_t jelly_cons(Jelly, treenode_t, treenode_t);

@@ -303,15 +303,21 @@ int main () {
         hash256_t dumb_hash_1 = { fmix64(111111), fmix64(65535), fmix64(9),  65536 };
         hash256_t dumb_hash_2 = { fmix64(222222), fmix64(33333), (0ULL - 1), (65535ULL << 12) };
 
+        bool uniq_1=false, uniq_2=false, uniq_3=false;
+
         treenode_t top = read_many(ctx);
-        treenode_t tmp = jelly_pin(ctx, (void*) &dumb_hash_2);
+        treenode_t tmp = jelly_pin(ctx, &uniq_1, (void*) &dumb_hash_2);
         top = jelly_cons(ctx, tmp, top);
-        tmp = jelly_pin(ctx, (void*) &dumb_hash_1);
+        tmp = jelly_pin(ctx, &uniq_2, (void*) &dumb_hash_1);
         top = jelly_cons(ctx, tmp, top);
 
         // TODO: This breaks things for some reason.
-        tmp = jelly_pin(ctx, (void*) &dumb_hash_2);
+        tmp = jelly_pin(ctx, &uniq_3, (void*) &dumb_hash_2);
         top = jelly_cons(ctx, tmp, top);
+
+        printf("pin 1 is unique? %s\n", (uniq_1 ? "yes" : "no"));
+        printf("pin 2 is unique? %s\n", (uniq_2 ? "yes" : "no"));
+        printf("pin 3 is unique? %s\n", (uniq_3 ? "yes" : "no"));
 
         debugf("# Shattering Fragments\n");
 

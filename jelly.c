@@ -310,15 +310,16 @@ typedef struct {
         tagged_width_t width;
         uint64_t hash;
         uint64_t word;
-        treenode_t (*new_leaf)(Jelly, leaf_t);
+        treenode_t (*new_leaf)(Jelly, bool*, leaf_t);
+        bool *is_unique;
 } PackedInsertRequest;
 
 typedef struct {
-        bool ispin;
         tagged_width_t width;
         uint64_t hash;
         leaf_t leaf;
-        treenode_t (*new_leaf)(Jelly, leaf_t);
+        treenode_t (*new_leaf)(Jelly, bool*, leaf_t);
+        bool *is_unique;
 } IndirectInsertRequest;
 
 void jelly_debug_leaves(Jelly, bool);
@@ -509,7 +510,7 @@ treenode_t insert_packed_leaf(Jelly ctx, PackedInsertRequest req) {
                 .bytes = (uint8_t*) req.word
         };
 
-        treenode_t pointer = req.new_leaf(ctx, leaf);
+        treenode_t pointer = req.new_leaf(ctx, req.is_unique, leaf);
 
         debugf("\t\tNEW_PACKED_LEAF:\n\t\t\t");
         if (DEBUG) print_tree_outline(ctx, pointer);
@@ -581,7 +582,7 @@ treenode_t insert_indirect_leaf(Jelly ctx, IndirectInsertRequest req) {
 
         ctx->leaves_table_count++;
 
-        treenode_t pointer = req.new_leaf(ctx, req.leaf);
+        treenode_t pointer = req.new_leaf(ctx, req.is_unique, req.leaf);
 
         debugf("\t\tNEW_INDIRECT_LEAF:\n\t\t\t");
         if (DEBUG) print_tree_outline(ctx, pointer);
@@ -712,7 +713,7 @@ INLINE nat_t alloc_nat(Jelly c) {
 }
 
 static treenode_t
-new_nat (Jelly ctx, leaf_t leaf) {
+new_nat (Jelly ctx, bool *is_unique, leaf_t leaf) {
         nat_t nat = alloc_nat(ctx);
         ctx->nats[nat.ix] = leaf;
         return alloc_treenode(ctx, TAG_NAT(nat));
@@ -728,6 +729,7 @@ jelly_packed_nat(Jelly ctx, uint32_t byte_width, uint64_t word) {
                 .hash = fmix64(word),
                 .word = word,
                 .new_leaf = new_nat,
+                .is_unique = NULL,
             }
         );
 }
@@ -767,7 +769,7 @@ treenode_t jelly_nat(Jelly ctx, size_t wid, uint8_t *byt) {
                 .hash = hash,
                 .leaf = (leaf_t){ .width_bytes = wid, .bytes = byt },
                 .new_leaf = new_nat,
-                .ispin = false,
+                .is_unique = NULL,
             }
         );
 }
@@ -791,7 +793,7 @@ INLINE bar_t alloc_bar(Jelly c) {
 }
 
 static treenode_t
-new_bar (Jelly ctx, leaf_t leaf) {
+new_bar (Jelly ctx, bool *is_unique, leaf_t leaf) {
         bar_t bar = alloc_bar(ctx);
         ctx->bars[bar.ix] = leaf;
         return alloc_treenode(ctx, TAG_BAR(bar));
@@ -813,6 +815,7 @@ treenode_t jelly_bar(Jelly ctx, size_t wid, uint8_t *byt) {
                         .hash = fmix64(word),
                         .word = word,
                         .new_leaf = new_bar,
+                        .is_unique = NULL,
                     }
                 );
         } else {
@@ -826,6 +829,7 @@ treenode_t jelly_bar(Jelly ctx, size_t wid, uint8_t *byt) {
                         .hash = hash,
                         .leaf = leaf,
                         .new_leaf = new_bar,
+                        .is_unique = NULL,
                     }
                 );
         }
@@ -847,19 +851,22 @@ INLINE pin_t alloc_pin(Jelly c) {
         return (pin_t){ .ix = res };
 }
 
-static treenode_t new_pin (Jelly ctx, leaf_t leaf) {
+static treenode_t new_pin (Jelly ctx, bool *is_unique, leaf_t leaf) {
+        if (is_unique != NULL) { *is_unique = true; }
         hash256_t *hash = (hash256_t*) leaf.bytes;
         pin_t pin = alloc_pin(ctx);
         ctx->pins[pin.ix] = hash;
         return alloc_treenode(ctx, TAG_PIN(pin));
 }
 
-treenode_t jelly_pin(Jelly ctx, uint8_t *hash_bytes) {
+treenode_t jelly_pin(Jelly ctx, bool *is_unique, uint8_t *hash_bytes) {
         hash256_t *pin = (void*) hash_bytes;
 
         debugf("\tjelly_pin(hash=%lx)\n", pin->a);
 
         uint64_t hash = pin->a;
+
+        *is_unique = false;
 
         return insert_indirect_leaf(ctx,
             (IndirectInsertRequest){
@@ -867,7 +874,7 @@ treenode_t jelly_pin(Jelly ctx, uint8_t *hash_bytes) {
                 .hash = hash,
                 .leaf = (leaf_t) { .width_bytes = 32, .bytes = (uint8_t*) pin },
                 .new_leaf = new_pin,
-                .ispin = true,
+                .is_unique = is_unique,
             }
         );
 }
